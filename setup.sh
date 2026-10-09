@@ -1,7 +1,7 @@
 #!/bin/bash
 
 ################################################################################
-# SessionWatch Universal Installer v4.0 (Full Self-Healing & Tamper Alerts)
+# SessionWatch Universal Installer v4.0 (Full Self-Healing & Log Shield)
 # Notification Options: Discord, Email, Microsoft Teams, Wall (local)
 # Compatible with: Debian, Ubuntu, CentOS, RHEL, Rocky Linux, AlmaLinux
 ################################################################################
@@ -42,18 +42,18 @@ detect_os() {
         ubuntu|debian)
             PKG_MANAGER="apt-get"
             PKG_UPDATE="apt-get update"
-            PKG_INSTALL="apt-get install -y"
+            PKG_INSTALL="apt-get install -y "
             AUDIT_PKGS="auditd audispd-plugins xxd cron"
             ;;
         centos|rhel|rocky|almalinux|fedora)
             if command -v dnf &> /dev/null; then
                 PKG_MANAGER="dnf"
                 PKG_UPDATE="dnf check-update || true"
-                PKG_INSTALL="dnf install -y"
+                PKG_INSTALL="dnf install -y "
             else
                 PKG_MANAGER="yum"
                 PKG_UPDATE="yum check-update || true"
-                PKG_INSTALL="yum install -y"
+                PKG_INSTALL="yum install -y "
             fi
             AUDIT_PKGS="audit vim-common crontabs"
             ;;
@@ -76,16 +76,16 @@ install_dependencies() {
     
     if ! command -v jq &> /dev/null; then
         echo "  Installing jq..."
-        $PKG_INSTALL jq
+        ${PKG_INSTALL}jq
     fi
     
     if ! command -v curl &> /dev/null; then
         echo "  Installing curl..."
-        $PKG_INSTALL curl
+        ${PKG_INSTALL}curl
     fi
 
     echo "  Installing auditd & cron..."
-    $PKG_INSTALL $AUDIT_PKGS
+    ${PKG_INSTALL}${AUDIT_PKGS}
 
     systemctl enable auditd 2>/dev/null || true
     systemctl start auditd 2>/dev/null || service auditd start 2>/dev/null || true
@@ -96,27 +96,40 @@ install_dependencies() {
     echo ""
 }
 
-# Create directories
+# Create directories and set tight permissions
 create_directories() {
-    echo "[2/10] Creating directories..."
+    echo "[2/10] Creating directories and setting permissions..."
     
     mkdir -p /var/log/sessionwatch
     mkdir -p /etc/sessionwatch
+    mkdir -p /var/log/audit
+    
     chmod 750 /var/log/sessionwatch
+    chmod 700 /var/log/audit
     
     # Remove legacy profile hooks
     rm -f /etc/profile.d/sessionwatch.sh
     
     > /var/log/sessionwatch/alerts.log 2>/dev/null || true
     
-    echo -e "${GREEN}✓ Directories prepared${NC}"
+    echo -e "${GREEN}✓ Directories prepared with tight permissions${NC}"
     echo ""
 }
 
-# Configure auditd rules with Immutable Kernel Flag (-e 2)
+# Configure auditd rules & auditd.conf for auto-rotation and DoS prevention
 configure_auditd_rules() {
-    echo "[3/10] Configuring auditd kernel rules (with Immutable -e 2 flag)..."
+    echo "[3/10] Configuring auditd rotation limits & kernel rules (-e 2)..."
 
+    # 1. Harden auditd.conf against log bloat / disk saturation
+    if [ -f /etc/audit/auditd.conf ]; then
+        sed -i 's/^max_log_file =.*/max_log_file = 20/' /etc/audit/auditd.conf
+        sed -i 's/^num_logs =.*/num_logs = 5/' /etc/audit/auditd.conf
+        sed -i 's/^max_log_file_action =.*/max_log_file_action = ROTATE/' /etc/audit/auditd.conf
+        sed -i 's/^space_left_action =.*/space_left_action = SYSLOG/' /etc/audit/auditd.conf
+        sed -i 's/^admin_space_left_action =.*/admin_space_left_action = SUSPEND/' /etc/audit/auditd.conf
+    fi
+
+    # 2. Add audit rules
     mkdir -p /etc/audit/rules.d/
 
     cat > /etc/audit/rules.d/sessionwatch.rules << 'EOF'
@@ -139,7 +152,7 @@ EOF
         auditctl -R /etc/audit/rules.d/sessionwatch.rules || true
     fi
 
-    echo -e "${GREEN}✓ Auditd kernel monitoring rules loaded and locked (-e 2)${NC}"
+    echo -e "${GREEN}✓ Auditd rotation & kernel rules locked (-e 2)${NC}"
     echo ""
 }
 
@@ -163,14 +176,23 @@ EOF
     echo ""
 }
 
-# Create alert patterns
+# Create alert patterns (including Log Tampering & Destruction)
 create_alert_patterns() {
-    echo "[5/10] Creating alert patterns (including Service Tampering & Escalation)..."
+    echo "[5/10] Creating alert patterns (including Log Destruction & Service Tampering)..."
     
     cat > /etc/sessionwatch/alert-patterns.txt << 'EOF'
 # ==============================================================================
 # SessionWatch Alert Patterns
 # ==============================================================================
+
+# --- CRITICAL: Log Destruction & DoS Patterns ---
+/dev/random
+/dev/urandom
+/dev/zero
+>.*audit\.log
+>>.*audit\.log
+truncate.*audit\.log
+rm.*audit\.log
 
 # --- HIGH: Service Tampering Attempts (SessionWatch / Auditd) ---
 systemctl.*(stop|disable|mask|kill|restart).*(sessionwatch|auditd)
@@ -284,7 +306,7 @@ EOF
         -d '{"content": "✓ SessionWatch webhook test successful"}' \
         "$WEBHOOK_URL")
     
-    if [ "$HTTP_CODE" = "204" ] || [ "$HTTP_CODE" = "200" ]; then
+    if [ "$HTTP_CODE" -eq 204 ] 2>/dev/null || [ "$HTTP_CODE" -eq 200 ] 2>/dev/null; then
         echo -e "${GREEN}✓ Webhook test successful!${NC}"
     else
         echo -e "${RED}✗ Webhook test failed (HTTP $HTTP_CODE)${NC}"
@@ -294,7 +316,7 @@ EOF
 
 configure_email() {
     echo "Configuring Email notifications..."
-    $PKG_INSTALL esmtp
+    ${PKG_INSTALL}esmtp
     
     echo -n "SMTP Server (e.g., smtp.gmail.com): "
     read -r SMTP_SERVER
@@ -355,9 +377,9 @@ configure_notifications() {
     esac
 }
 
-# Create monitoring script
+# Create monitoring script (with Binary Stream Sanitization `tr -cd`)
 create_monitor_script() {
-    echo "[7/10] Creating auditd monitoring script with self-healing detection..."
+    echo "[7/10] Creating auditd monitoring script with stream sanitization..."
     
     cat > /usr/local/bin/sessionwatch-monitor.sh << 'MONITOR_SCRIPT'
 #!/bin/bash
@@ -436,7 +458,7 @@ User Information: ${user_info}
 Command / Event: ${command}
 ================================================================================"
 
-    echo "Subject: [SessionWatch ${severity}] Alert on ${HOSTNAME}
+    echo "Subject: [SessionWatch ${severity}] Alert on${HOSTNAME}
 From: ${SMTP_FROM}
 To: ${SMTP_TO}
 
@@ -502,7 +524,7 @@ send_wall_alert() {
 ║              🚨 SessionWatch Security Alert                        ║
 ╠════════════════════════════════════════════════════════════════════╣
 ║  Severity: ${severity}
-║  Server: ${HOSTNAME} | Time: ${TIMESTAMP}
+║  Server: ${HOSTNAME} | Time:${TIMESTAMP}
 ║  User: ${user_info}
 ║  Event: ${command:0:60}
 ╚════════════════════════════════════════════════════════════════════╝
@@ -512,7 +534,7 @@ send_wall_alert() {
 
 send_alert() {
     local message="$1" severity="$2" user_info="$3" command="$4"
-    echo "[$(date)] [${severity}] ${user_info}: ${command}" >> ${LOG_DIR}/alerts.log
+    echo "[$(date)] [${severity}]${user_info}: ${command}" >> ${LOG_DIR}/alerts.log
     
     case "$NOTIFICATION_METHOD" in
         discord) send_discord_alert "$message" "$severity" "$user_info" "$command" ;;
@@ -522,7 +544,7 @@ send_alert() {
     esac
 }
 
-# --- SessionWatch Self-Recovery & Clean Shutdown Handling ---
+# Clean Shutdown Handling & Self-Recovery
 cleanup() {
     echo "STOPPED" > "${STATE_FILE}"
     exit 0
@@ -548,7 +570,8 @@ echo "SessionWatch kernel monitoring active."
 
 declare -A USER_MAP
 
-tail -n 0 -F "${AUDIT_LOG}" 2>/dev/null | while read -r line; do
+# Pipe through `tr -cd` to strip null bytes and binary junk from corrupting Bash read
+tail -n 0 -F "${AUDIT_LOG}" 2>/dev/null | tr -cd '\11\12\15\40-\176' | while read -r line; do
     [ -z "$line" ] && continue
     
     # --- Detect Auditd Daemon Lifecycle Events ---
@@ -620,10 +643,13 @@ tail -n 0 -F "${AUDIT_LOG}" 2>/dev/null | while read -r line; do
             [ "${pattern:0:1}" = "#" ] && continue
 
             if echo "$COMMAND" | grep -qiE "$pattern"; then
-                echo "[$(date '+%H:%M:%S')] ⚠️ MATCH! Pattern: $pattern"
+                echo "[$(date '+\%H:\%M:\%S')] ⚠️ MATCH! Pattern: $pattern"
 
                 # Categorize Severity
-                if echo "$COMMAND" | grep -qE "sessionwatch|auditd"; then
+                if echo "$COMMAND" | grep -qE "/dev/random|/dev/urandom|/dev/zero|>.*audit\.log|truncate.*audit\.log"; then
+                    SEVERITY="CRITICAL"
+                    MSG="Log tampering / DoS attempt detected!"
+                elif echo "$COMMAND" | grep -qE "sessionwatch|auditd"; then
                     SEVERITY="HIGH"
                     MSG="Attempted to stop, kill, or tamper with monitoring services!"
                 elif echo "$COMMAND" | grep -qE "rm -rf|mkfs|dd if=|shred"; then
@@ -664,7 +690,7 @@ MONITOR_SCRIPT
     echo ""
 }
 
-# Create Cron Watchdog (monitors both sessionwatch AND auditd)
+# Create Cron Watchdog
 create_watchdog_cron() {
     echo "[8/10] Creating Dual Watchdog cron job (SessionWatch + Auditd)..."
     
@@ -794,13 +820,13 @@ display_summary() {
     echo ""
     echo "Notification Method: ${NOTIFICATION_METHOD^^}"
     echo "Monitoring Engine:   Linux Kernel Auditd (execve tracking)"
-    echo "Self-Healing Alerts: Active (Alerts sent on kill attempts & resurrection)"
+    echo "Log Shield Status:   Active (tr -cd sanitization + execve pre-detection)"
     echo ""
-    echo "How to test self-healing alerts:"
-    echo "  1. Test kill attempt:     pkill -9 -f sessionwatch-monitor.sh"
-    echo "     --> Systemd will restart it in 1s & send a HIGH alert: 'resurrected'"
-    echo "  2. Test stop attempt:     systemctl stop auditd"
-    echo "     --> Systemd will refuse AND auditd will log the attempt as a HIGH alert"
+    echo "Log Tampering Protections:"
+    echo "  • Stream Sanitization:  Binary characters (\0, etc.) filtered out instantly"
+    echo "  • Pre-Execution Alert:  Commands using /dev/random or > audit.log trigger CRITICAL"
+    echo "  • Auditd Auto-Rotation: max_log_file = 20MB, ROTATE action enforced"
+    echo "  • Directory Lock:       /var/log/audit restricted to chmod 700"
     echo ""
     echo "Useful commands:"
     echo "  • Service status:     systemctl status sessionwatch auditd"
