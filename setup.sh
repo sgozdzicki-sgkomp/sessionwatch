@@ -1,7 +1,7 @@
 #!/bin/bash
 
 ################################################################################
-# SessionWatch Universal Installer v4.0 (Hardened Auditd Kernel Monitor)
+# SessionWatch Universal Installer v4.0 (Full Self-Healing & Tamper Alerts)
 # Notification Options: Discord, Email, Microsoft Teams, Wall (local)
 # Compatible with: Debian, Ubuntu, CentOS, RHEL, Rocky Linux, AlmaLinux
 ################################################################################
@@ -16,7 +16,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 echo "================================================================================"
-echo "      SessionWatch Hardened Kernel Security Monitor v4.0 (Auditd)"
+echo "   SessionWatch Self-Healing Security Monitor & Auditd Shield v4.0"
 echo "           Discord | Email | Teams | Wall Notifications"
 echo "================================================================================"
 echo ""
@@ -70,7 +70,7 @@ detect_os() {
 
 # Install dependencies
 install_dependencies() {
-    echo "[1/9] Installing dependencies (auditd, cron, utilities)..."
+    echo "[1/10] Installing dependencies (auditd, cron, utilities)..."
     
     $PKG_UPDATE > /dev/null 2>&1
     
@@ -98,7 +98,7 @@ install_dependencies() {
 
 # Create directories
 create_directories() {
-    echo "[2/9] Creating directories..."
+    echo "[2/10] Creating directories..."
     
     mkdir -p /var/log/sessionwatch
     mkdir -p /etc/sessionwatch
@@ -113,9 +113,9 @@ create_directories() {
     echo ""
 }
 
-# Configure auditd rules
+# Configure auditd rules with Immutable Kernel Flag (-e 2)
 configure_auditd_rules() {
-    echo "[3/9] Configuring auditd kernel rules..."
+    echo "[3/10] Configuring auditd kernel rules (with Immutable -e 2 flag)..."
 
     mkdir -p /etc/audit/rules.d/
 
@@ -126,6 +126,9 @@ configure_auditd_rules() {
 
 -a always,exit -F arch=b64 -S execve -F auid>=1000 -F auid!=4294967295 -k user_commands
 -a always,exit -F arch=b32 -S execve -F auid>=1000 -F auid!=4294967295 -k user_commands
+
+# Lock audit configuration in kernel until reboot
+-e 2
 EOF
 
     chmod 640 /etc/audit/rules.d/sessionwatch.rules
@@ -136,18 +139,44 @@ EOF
         auditctl -R /etc/audit/rules.d/sessionwatch.rules || true
     fi
 
-    echo -e "${GREEN}✓ Auditd kernel monitoring rules loaded${NC}"
+    echo -e "${GREEN}✓ Auditd kernel monitoring rules loaded and locked (-e 2)${NC}"
+    echo ""
+}
+
+# Harden auditd Systemd Service
+harden_auditd_service() {
+    echo "[4/10] Hardening auditd systemd service..."
+
+    mkdir -p /etc/systemd/system/auditd.service.d/
+
+    cat > /etc/systemd/system/auditd.service.d/override.conf << 'EOF'
+[Unit]
+RefuseManualStop=yes
+
+[Service]
+Restart=always
+RestartSec=1
+EOF
+
+    systemctl daemon-reload
+    echo -e "${GREEN}✓ Auditd systemd stop protection enabled${NC}"
     echo ""
 }
 
 # Create alert patterns
 create_alert_patterns() {
-    echo "[4/9] Creating alert patterns (including Logins & Root Escalation)..."
+    echo "[5/10] Creating alert patterns (including Service Tampering & Escalation)..."
     
     cat > /etc/sessionwatch/alert-patterns.txt << 'EOF'
 # ==============================================================================
 # SessionWatch Alert Patterns
 # ==============================================================================
+
+# --- HIGH: Service Tampering Attempts (SessionWatch / Auditd) ---
+systemctl.*(stop|disable|mask|kill|restart).*(sessionwatch|auditd)
+service.*(sessionwatch|auditd).*(stop|restart)
+(pkill|killall|kill).*sessionwatch
+(pkill|killall|kill).*auditd
 
 # --- INFO: System Login Events ---
 /sshd
@@ -212,7 +241,7 @@ EOF
 
 # Choose notification method
 choose_notification_method() {
-    echo "[5/9] Choosing notification method..."
+    echo "[6/10] Choosing notification method..."
     echo ""
     echo "How would you like to receive security alerts?"
     echo "  1) Discord webhook"
@@ -328,7 +357,7 @@ configure_notifications() {
 
 # Create monitoring script
 create_monitor_script() {
-    echo "[6/9] Creating auditd monitoring script..."
+    echo "[7/10] Creating auditd monitoring script with self-healing detection..."
     
     cat > /usr/local/bin/sessionwatch-monitor.sh << 'MONITOR_SCRIPT'
 #!/bin/bash
@@ -337,6 +366,7 @@ LOG_DIR="/var/log/sessionwatch"
 ALERT_PATTERNS="/etc/sessionwatch/alert-patterns.txt"
 NOTIFICATION_CONF="/etc/sessionwatch/notification.conf"
 AUDIT_LOG="/var/log/audit/audit.log"
+STATE_FILE="${LOG_DIR}/service.state"
 
 if [ ! -f "${NOTIFICATION_CONF}" ]; then
     echo "ERROR: Notification configuration not found!"
@@ -381,7 +411,7 @@ send_discord_alert() {
                     { name: "⚠️ Severity", value: $severity, inline: true },
                     { name: "🖥️ Server", value: $hostname, inline: true },
                     { name: "👤 User Info", value: $userinfo, inline: false },
-                    { name: "💻 Command Executed", value: ("```bash\n" + $command + "\n```"), inline: false }
+                    { name: "💻 Command Executed / Event", value: ("```bash\n" + $command + "\n```"), inline: false }
                 ],
                 timestamp: $timestamp,
                 footer: { text: "SessionWatch v4.0 (Auditd Hardened)" }
@@ -403,7 +433,7 @@ Severity: ${severity}
 Server: ${HOSTNAME}
 Timestamp: ${TIMESTAMP}
 User Information: ${user_info}
-Command Executed: ${command}
+Command / Event: ${command}
 ================================================================================"
 
     echo "Subject: [SessionWatch ${severity}] Alert on ${HOSTNAME}
@@ -453,7 +483,7 @@ send_teams_alert() {
                     { "name": "Server:", "value": $hostname },
                     { "name": "Time:", "value": $timestamp },
                     { "name": "User:", "value": $userinfo },
-                    { "name": "Command:", "value": $command }
+                    { "name": "Command/Event:", "value": $command }
                 ],
                 "markdown": true
             }]
@@ -474,7 +504,7 @@ send_wall_alert() {
 ║  Severity: ${severity}
 ║  Server: ${HOSTNAME} | Time: ${TIMESTAMP}
 ║  User: ${user_info}
-║  Command: ${command:0:60}
+║  Event: ${command:0:60}
 ╚════════════════════════════════════════════════════════════════════╝
 "
     echo "$WALL_MESSAGE" | wall 2>/dev/null
@@ -492,8 +522,28 @@ send_alert() {
     esac
 }
 
-send_alert "SessionWatch monitoring service started (Auditd Kernel Mode)" "INFO" "system@$(hostname)" "systemctl start sessionwatch"
+# --- SessionWatch Self-Recovery & Clean Shutdown Handling ---
+cleanup() {
+    echo "STOPPED" > "${STATE_FILE}"
+    exit 0
+}
+trap cleanup SIGTERM SIGINT
 
+if [ -f "${STATE_FILE}" ] && [ "$(cat "${STATE_FILE}")" = "RUNNING" ]; then
+    send_alert \
+        "SessionWatch process was forcefully killed or crashed! Automatically resurrected by systemd." \
+        "HIGH" \
+        "system@$(hostname)" \
+        "Resurrected daemon (PID $$)"
+else
+    send_alert \
+        "SessionWatch monitoring service started (Auditd Kernel Mode)" \
+        "INFO" \
+        "system@$(hostname)" \
+        "systemctl start sessionwatch"
+fi
+
+echo "RUNNING" > "${STATE_FILE}"
 echo "SessionWatch kernel monitoring active."
 
 declare -A USER_MAP
@@ -501,6 +551,23 @@ declare -A USER_MAP
 tail -n 0 -F "${AUDIT_LOG}" 2>/dev/null | while read -r line; do
     [ -z "$line" ] && continue
     
+    # --- Detect Auditd Daemon Lifecycle Events ---
+    if echo "$line" | grep -q 'type=DAEMON_END'; then
+        send_alert \
+            "Auditd daemon was terminated or stopped!" \
+            "CRITICAL" \
+            "auditd@$(hostname)" \
+            "type=DAEMON_END detected in audit log"
+        continue
+    elif echo "$line" | grep -q 'type=DAEMON_START'; then
+        send_alert \
+            "Auditd daemon started or automatically recovered!" \
+            "HIGH" \
+            "auditd@$(hostname)" \
+            "type=DAEMON_START detected in audit log"
+        continue
+    fi
+
     # 1. Map SYSCALL event to user
     if echo "$line" | grep -q 'type=SYSCALL.*key="user_commands"'; then
         EVENT_ID=$(echo "$line" | grep -oP 'msg=audit\([^:]+:\K[0-9]+')
@@ -556,7 +623,10 @@ tail -n 0 -F "${AUDIT_LOG}" 2>/dev/null | while read -r line; do
                 echo "[$(date '+%H:%M:%S')] ⚠️ MATCH! Pattern: $pattern"
 
                 # Categorize Severity
-                if echo "$COMMAND" | grep -qE "rm -rf|mkfs|dd if=|shred"; then
+                if echo "$COMMAND" | grep -qE "sessionwatch|auditd"; then
+                    SEVERITY="HIGH"
+                    MSG="Attempted to stop, kill, or tamper with monitoring services!"
+                elif echo "$COMMAND" | grep -qE "rm -rf|mkfs|dd if=|shred"; then
                     SEVERITY="CRITICAL"
                     MSG="Critical destruction command detected!"
                 elif echo "$COMMAND" | grep -qE "shadow|passwd|nc -|nc -e|bash -i|pty\.spawn"; then
@@ -594,21 +664,21 @@ MONITOR_SCRIPT
     echo ""
 }
 
-# Create Cron Watchdog
+# Create Cron Watchdog (monitors both sessionwatch AND auditd)
 create_watchdog_cron() {
-    echo "[7/9] Creating Watchdog cron job..."
+    echo "[8/10] Creating Dual Watchdog cron job (SessionWatch + Auditd)..."
     
     cat > /etc/cron.d/sessionwatch-watchdog << 'EOF'
-* * * * * root /bin/chmod +x /usr/local/bin/sessionwatch-monitor.sh 2>/dev/null; /bin/systemctl is-active --quiet sessionwatch || (/bin/systemctl enable sessionwatch --now 2>/dev/null)
+* * * * * root /bin/chmod +x /usr/local/bin/sessionwatch-monitor.sh 2>/dev/null; /bin/systemctl is-active --quiet auditd || (/bin/systemctl enable auditd --now 2>/dev/null); /bin/systemctl is-active --quiet sessionwatch || (/bin/systemctl enable sessionwatch --now 2>/dev/null)
 EOF
     chmod 644 /etc/cron.d/sessionwatch-watchdog
     echo -e "${GREEN}✓ Watchdog cron created${NC}"
     echo ""
 }
 
-# Create and lock hardened systemd service
+# Create and lock hardened systemd service & auditd configs
 create_service() {
-    echo "[8/9] Creating hardened systemd service & applying file immutability..."
+    echo "[9/10] Creating hardened systemd service & applying file immutability..."
     
     cat > /etc/systemd/system/sessionwatch.service << 'SERVICE'
 [Unit]
@@ -633,10 +703,12 @@ SERVICE
     systemctl enable sessionwatch
     systemctl start sessionwatch
     
-    # Apply immutable flag (+i) to prevent deletion, edit, or chmod -x by root/users
+    # Apply immutable flag (+i) to prevent deletion, edit, or chmod -x
     chattr +i /usr/local/bin/sessionwatch-monitor.sh 2>/dev/null || true
     chattr +i /etc/systemd/system/sessionwatch.service 2>/dev/null || true
+    chattr +i /etc/systemd/system/auditd.service.d/override.conf 2>/dev/null || true
     chattr +i /etc/audit/rules.d/sessionwatch.rules 2>/dev/null || true
+    chattr +i /etc/audit/auditd.conf 2>/dev/null || true
     chattr +i /etc/cron.d/sessionwatch-watchdog 2>/dev/null || true
     chattr +i /etc/sessionwatch/alert-patterns.txt 2>/dev/null || true
     
@@ -653,7 +725,7 @@ SERVICE
 
 # Create uninstall script
 create_uninstall_script() {
-    echo "[9/9] Creating uninstaller..."
+    echo "[10/10] Creating uninstaller..."
     cat > /usr/local/bin/uninstall-sessionwatch.sh << 'UNINSTALL_SCRIPT'
 #!/bin/bash
 
@@ -676,18 +748,23 @@ fi
 echo "Removing file immutability flags (+i)..."
 chattr -i /usr/local/bin/sessionwatch-monitor.sh 2>/dev/null || true
 chattr -i /etc/systemd/system/sessionwatch.service 2>/dev/null || true
+chattr -i /etc/systemd/system/auditd.service.d/override.conf 2>/dev/null || true
 chattr -i /etc/audit/rules.d/sessionwatch.rules 2>/dev/null || true
+chattr -i /etc/audit/auditd.conf 2>/dev/null || true
 chattr -i /etc/cron.d/sessionwatch-watchdog 2>/dev/null || true
 chattr -i /etc/sessionwatch/alert-patterns.txt 2>/dev/null || true
 
 echo "Removing watchdog cron..."
 rm -f /etc/cron.d/sessionwatch-watchdog
 
+echo "Removing auditd systemd override..."
+rm -rf /etc/systemd/system/auditd.service.d
+
 echo "Disabling RefuseManualStop to allow service shutdown..."
 sed -i '/RefuseManualStop/d' /etc/systemd/system/sessionwatch.service 2>/dev/null || true
 systemctl daemon-reload
 
-echo "Stopping service..."
+echo "Stopping SessionWatch service..."
 systemctl stop sessionwatch 2>/dev/null || true
 systemctl disable sessionwatch 2>/dev/null || true
 rm -f /etc/systemd/system/sessionwatch.service
@@ -695,9 +772,6 @@ systemctl daemon-reload
 
 echo "Removing auditd rules..."
 rm -f /etc/audit/rules.d/sessionwatch.rules
-if command -v augenrules &> /dev/null; then
-    augenrules --load || true
-fi
 
 echo "Removing files and logs..."
 rm -f /usr/local/bin/sessionwatch-monitor.sh
@@ -715,26 +789,21 @@ UNINSTALL_SCRIPT
 
 display_summary() {
     echo "================================================================================"
-    echo -e "${GREEN}      ✓ SessionWatch Installed & Hardened Successfully!${NC}"
+    echo -e "${GREEN}  ✓ SessionWatch & Auditd Fully Hardened & Installed Successfully!${NC}"
     echo "================================================================================"
     echo ""
     echo "Notification Method: ${NOTIFICATION_METHOD^^}"
     echo "Monitoring Engine:   Linux Kernel Auditd (execve tracking)"
-    echo "Anti-Tamper Status:  Active (chattr +i, RefuseManualStop, Cron Watchdog)"
+    echo "Self-Healing Alerts: Active (Alerts sent on kill attempts & resurrection)"
     echo ""
-    echo "Configured Alert Severity Levels:"
-    echo "  • INFO:    System Logins (sshd, login)"
-    echo "  • WARNING: Root Privilege Escalation (sudo, su, doas, pkexec)"
-    echo "  • MEDIUM:  Suspicious commands (chmod 777, wget|bash, etc.)"
-    echo "  • HIGH:    Backdoors & shadow access"
-    echo "  • CRITICAL: Filesystem destruction (rm -rf /, dd, mkfs)"
-    echo ""
-    echo "How to test:"
-    echo "  1. Test Root Escalation (WARNING): sudo whoami"
-    echo "  2. Test Critical Alert (CRITICAL): rm -rf /tmp/fake_dir"
+    echo "How to test self-healing alerts:"
+    echo "  1. Test kill attempt:     pkill -9 -f sessionwatch-monitor.sh"
+    echo "     --> Systemd will restart it in 1s & send a HIGH alert: 'resurrected'"
+    echo "  2. Test stop attempt:     systemctl stop auditd"
+    echo "     --> Systemd will refuse AND auditd will log the attempt as a HIGH alert"
     echo ""
     echo "Useful commands:"
-    echo "  • Service status:     systemctl status sessionwatch"
+    echo "  • Service status:     systemctl status sessionwatch auditd"
     echo "  • Live alerts log:    tail -f /var/log/sessionwatch/alerts.log"
     echo "  • Uninstall:          sudo /usr/local/bin/uninstall-sessionwatch.sh"
     echo ""
@@ -746,6 +815,7 @@ main() {
     install_dependencies
     create_directories
     configure_auditd_rules
+    harden_auditd_service
     create_alert_patterns
     choose_notification_method
     configure_notifications
