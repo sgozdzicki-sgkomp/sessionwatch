@@ -1,7 +1,7 @@
 #!/bin/bash
 
 ################################################################################
-# SessionWatch Universal Installer v4.0 (Full Self-Healing & Log Shield)
+# SessionWatch Universal Installer v4.1-1 (Full Self-Healing & Log Shield)
 # Notification Options: Discord, Email, Microsoft Teams, Wall (local)
 # Compatible with: Debian, Ubuntu, CentOS, RHEL, Rocky Linux, AlmaLinux
 ################################################################################
@@ -16,7 +16,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 echo "================================================================================"
-echo "   SessionWatch Self-Healing Security Monitor & Auditd Shield v4.0"
+echo "   SessionWatch Self-Healing Security Monitor & Auditd Shield v4.1-1"
 echo "           Discord | Email | Teams | Wall Notifications"
 echo "================================================================================"
 echo ""
@@ -107,9 +107,7 @@ create_directories() {
     chmod 750 /var/log/sessionwatch
     chmod 700 /var/log/audit
     
-    # Remove legacy profile hooks
     rm -f /etc/profile.d/sessionwatch.sh
-    
     > /var/log/sessionwatch/alerts.log 2>/dev/null || true
     
     echo -e "${GREEN}✓ Directories prepared with tight permissions${NC}"
@@ -120,7 +118,6 @@ create_directories() {
 configure_auditd_rules() {
     echo "[3/10] Configuring auditd rotation limits & kernel rules (-e 2)..."
 
-    # 1. Harden auditd.conf against log bloat / disk saturation
     if [ -f /etc/audit/auditd.conf ]; then
         sed -i 's/^max_log_file =.*/max_log_file = 20/' /etc/audit/auditd.conf
         sed -i 's/^num_logs =.*/num_logs = 5/' /etc/audit/auditd.conf
@@ -129,7 +126,6 @@ configure_auditd_rules() {
         sed -i 's/^admin_space_left_action =.*/admin_space_left_action = SUSPEND/' /etc/audit/auditd.conf
     fi
 
-    # 2. Add audit rules
     mkdir -p /etc/audit/rules.d/
 
     cat > /etc/audit/rules.d/sessionwatch.rules << 'EOF'
@@ -267,9 +263,9 @@ choose_notification_method() {
     echo ""
     echo "How would you like to receive security alerts?"
     echo "  1) Discord webhook"
-    echo "  2) Email (via SMTP)"
+    echo "  2) Email (via msmtp)"
     echo "  3) Microsoft Teams webhook"
-    echo "  4) Wall (local terminal broadcast to root)"
+    echo "  4) Wall (broadcast to all active ptys in /dev/pts)"
     echo ""
     echo -n "Enter choice (1-4): "
     read -r NOTIFY_CHOICE
@@ -315,12 +311,12 @@ EOF
 }
 
 configure_email() {
-    echo "Configuring Email notifications..."
-    ${PKG_INSTALL}esmtp
+    echo "Configuring Email notifications (msmtp)..."
+    ${PKG_INSTALL}msmtp msmtp-mta
     
     echo -n "SMTP Server (e.g., smtp.gmail.com): "
     read -r SMTP_SERVER
-    echo -n "SMTP Port (e.g. 587): "
+    echo -n "SMTP Port (587 for STARTTLS, 465 for implicit TLS): "
     read -r SMTP_PORT
     echo -n "Your email address (from): "
     read -r SMTP_FROM
@@ -332,14 +328,90 @@ configure_email() {
     read -rs SMTP_PASS
     echo ""
     
-    cat > /etc/esmtprc << EOF
-identity = "${SMTP_FROM}"
-hostname = ${SMTP_SERVER}:${SMTP_PORT}
-username = "${SMTP_USER}"
-password = "${SMTP_PASS}"
-starttls = yes
+    # ------------------------------------------------------------------
+    # Auto-detect TLS mode from port number:
+    #   465         -> implicit TLS (SMTPS)  -> tls_starttls off
+    #   587 / 25    -> STARTTLS              -> tls_starttls on
+    #   anything    -> assume STARTTLS (safe default for modern servers)
+    # ------------------------------------------------------------------
+    case "$SMTP_PORT" in
+        465)
+            TLS_STARTTLS="off"
+            TLS_MODE_DESC="implicit TLS (SMTPS)"
+            ;;
+        587|25|2525|submission)
+            TLS_STARTTLS="on"
+            TLS_MODE_DESC="STARTTLS"
+            ;;
+        *)
+            TLS_STARTTLS="on"
+            TLS_MODE_DESC="STARTTLS (assumed; edit /etc/msmtprc if wrong)"
+            ;;
+    esac
+    echo -e "  ${GREEN}✓ TLS mode: ${TLS_MODE_DESC} (auto-detected from port ${SMTP_PORT})${NC}"
+
+    # Pick the correct CA bundle per distro
+    if [ -f /etc/ssl/certs/ca-certificates.crt ]; then
+        CA_FILE="/etc/ssl/certs/ca-certificates.crt"
+    elif [ -f /etc/pki/tls/certs/ca-bundle.crt ]; then
+        CA_FILE="/etc/pki/tls/certs/ca-bundle.crt"
+    else
+        CA_FILE=""
+    fi
+
+    # Pre-create the log file so it always exists with sane perms
+    touch /var/log/msmtp.log
+    chmod 640 /var/log/msmtp.log
+
+    # ------------------------------------------------------------------
+    # IMPORTANT: the account is named "sessionwatch" (NOT "default").
+    # Naming it "default" collides with the `account default : <name>`
+    # directive and msmtp exits with code 78 (EX_CONFIG).
+    # ------------------------------------------------------------------
+    if [ -n "$CA_FILE" ]; then
+        cat > /etc/msmtprc << EOF
+# SessionWatch msmtp configuration (auto-generated)
+defaults
+auth           on
+tls            on
+tls_starttls   ${TLS_STARTTLS}
+tls_trust_file ${CA_FILE}
+logfile        /var/log/msmtp.log
+
+# SessionWatch SMTP account
+account        sessionwatch
+host           ${SMTP_SERVER}
+port           ${SMTP_PORT}
+from           ${SMTP_FROM}
+user           ${SMTP_USER}
+password       ${SMTP_PASS}
+
+# Make sessionwatch the default account
+account default : sessionwatch
 EOF
-    chmod 600 /etc/esmtprc
+    else
+        cat > /etc/msmtprc << EOF
+# SessionWatch msmtp configuration (auto-generated)
+defaults
+auth           on
+tls            on
+tls_starttls   ${TLS_STARTTLS}
+tls_trust_file system
+logfile        /var/log/msmtp.log
+
+# SessionWatch SMTP account
+account        sessionwatch
+host           ${SMTP_SERVER}
+port           ${SMTP_PORT}
+from           ${SMTP_FROM}
+user           ${SMTP_USER}
+password       ${SMTP_PASS}
+
+# Make sessionwatch the default account
+account default : sessionwatch
+EOF
+    fi
+    chmod 600 /etc/msmtprc
     
     cat > /etc/sessionwatch/notification.conf << EOF
 NOTIFICATION_METHOD=email
@@ -347,6 +419,41 @@ SMTP_FROM=${SMTP_FROM}
 SMTP_TO=${SMTP_TO}
 EOF
     chmod 600 /etc/sessionwatch/notification.conf
+    
+    # ------------------------------------------------------------------
+    # Live test with full stderr capture (set -e disabled locally)
+    # ------------------------------------------------------------------
+    echo ""
+    echo "Sending test email to ${SMTP_TO}..."
+    set +e
+    TEST_ERR=$(echo -e "Subject: SessionWatch SMTP Test\r\nFrom: ${SMTP_FROM}\r\nTo: ${SMTP_TO}\r\n\r\nThis is a test email from SessionWatch." | msmtp -a sessionwatch "${SMTP_TO}" 2>&1)
+    TEST_RC=$?
+    set -e
+    
+    if [ $TEST_RC -eq 0 ]; then
+        echo -e "${GREEN}✓ Test email sent successfully!${NC}"
+    else
+        echo -e "${RED}✗ Test email failed (msmtp exit code $TEST_RC)${NC}"
+        if [ -n "$TEST_ERR" ]; then
+            echo -e "${YELLOW}msmtp error output:${NC}"
+            echo "$TEST_ERR" | sed 's/^/  /'
+        fi
+        if [ -f /var/log/msmtp.log ]; then
+            echo -e "${YELLOW}Last 10 lines of /var/log/msmtp.log:${NC}"
+            tail -n 10 /var/log/msmtp.log | sed 's/^/  /'
+        fi
+        echo ""
+        echo -e "${YELLOW}Common fixes:${NC}"
+        echo "  • Port 465 → implicit TLS   (installer sets tls_starttls off)"
+        echo "  • Port 587 → STARTTLS        (installer sets tls_starttls on)"
+        echo "  • Gmail requires an App Password, not your account password"
+        echo "  • Verify credentials manually:"
+        echo "      echo -e 'Subject: test\\r\\n\\r\\nhello' | msmtp -a sessionwatch ${SMTP_TO}"
+        echo "  • Check current config:  cat /etc/msmtprc"
+        echo ""
+        echo -e "${YELLOW}SessionWatch will continue installing; fix email config later.${NC}"
+    fi
+    echo ""
 }
 
 configure_teams() {
@@ -400,11 +507,11 @@ source ${NOTIFICATION_CONF}
 send_discord_alert() {
     local message="$1" severity="$2" user_info="$3" command="$4"
     case "$severity" in
-        "CRITICAL") COLOR="15158332" ;; # Red
-        "HIGH")     COLOR="16776960" ;; # Orange
-        "WARNING")  COLOR="16705372" ;; # Yellow
-        "MEDIUM")   COLOR="16705372" ;; # Yellow
-        "INFO")     COLOR="3447003"  ;; # Blue
+        "CRITICAL") COLOR="15158332" ;;
+        "HIGH")     COLOR="16776960" ;;
+        "WARNING")  COLOR="16705372" ;;
+        "MEDIUM")   COLOR="16705372" ;;
+        "INFO")     COLOR="3447003"  ;;
         *)          COLOR="3447003"  ;;
     esac
     
@@ -436,7 +543,7 @@ send_discord_alert() {
                     { name: "💻 Command Executed / Event", value: ("```bash\n" + $command + "\n```"), inline: false }
                 ],
                 timestamp: $timestamp,
-                footer: { text: "SessionWatch v4.0 (Auditd Hardened)" }
+                footer: { text: "SessionWatch v4.1-1 (Auditd Hardened)" }
             }]
         }' 2>/dev/null)
     
@@ -458,11 +565,7 @@ User Information: ${user_info}
 Command / Event: ${command}
 ================================================================================"
 
-    echo "Subject: [SessionWatch ${severity}] Alert on${HOSTNAME}
-From: ${SMTP_FROM}
-To: ${SMTP_TO}
-
-${EMAIL_BODY}" | esmtp -f "${SMTP_FROM}" "${SMTP_TO}" 2>/dev/null
+    echo -e "Subject: [SessionWatch ${severity}] Alert on ${HOSTNAME}\r\nFrom: ${SMTP_FROM}\r\nTo: ${SMTP_TO}\r\n\r\n${EMAIL_BODY}" | msmtp -a sessionwatch "${SMTP_TO}" 2>/dev/null
 }
 
 send_teams_alert() {
@@ -524,12 +627,15 @@ send_wall_alert() {
 ║              🚨 SessionWatch Security Alert                        ║
 ╠════════════════════════════════════════════════════════════════════╣
 ║  Severity: ${severity}
-║  Server: ${HOSTNAME} | Time:${TIMESTAMP}
+║  Server: ${HOSTNAME} | Time: ${TIMESTAMP}
 ║  User: ${user_info}
 ║  Event: ${command:0:60}
 ╚════════════════════════════════════════════════════════════════════╝
 "
-    echo "$WALL_MESSAGE" | wall 2>/dev/null
+    for pts in /dev/pts/[0-9]*; do
+        [[ -w "$pts" ]] || continue
+        printf '\r\n%s\r\n' "$WALL_MESSAGE" > "$pts" 2>/dev/null || true
+    done
 }
 
 send_alert() {
@@ -544,7 +650,6 @@ send_alert() {
     esac
 }
 
-# Clean Shutdown Handling & Self-Recovery
 cleanup() {
     echo "STOPPED" > "${STATE_FILE}"
     exit 0
@@ -570,11 +675,9 @@ echo "SessionWatch kernel monitoring active."
 
 declare -A USER_MAP
 
-# Pipe through `tr -cd` to strip null bytes and binary junk from corrupting Bash read
 tail -n 0 -F "${AUDIT_LOG}" 2>/dev/null | tr -cd '\11\12\15\40-\176' | while read -r line; do
     [ -z "$line" ] && continue
     
-    # --- Detect Auditd Daemon Lifecycle Events ---
     if echo "$line" | grep -q 'type=DAEMON_END'; then
         send_alert \
             "Auditd daemon was terminated or stopped!" \
@@ -591,7 +694,6 @@ tail -n 0 -F "${AUDIT_LOG}" 2>/dev/null | tr -cd '\11\12\15\40-\176' | while rea
         continue
     fi
 
-    # 1. Map SYSCALL event to user
     if echo "$line" | grep -q 'type=SYSCALL.*key="user_commands"'; then
         EVENT_ID=$(echo "$line" | grep -oP 'msg=audit\([^:]+:\K[0-9]+')
         AUID=$(echo "$line" | grep -oP '\bauid=\K[0-9]+')
@@ -602,7 +704,6 @@ tail -n 0 -F "${AUDIT_LOG}" 2>/dev/null | tr -cd '\11\12\15\40-\176' | while rea
             USER_MAP["$EVENT_ID"]="$UNAME"
         fi
 
-    # 2. Capture EXECVE event and arguments
     elif echo "$line" | grep -q 'type=EXECVE'; then
         EVENT_ID=$(echo "$line" | grep -oP 'msg=audit\([^:]+:\K[0-9]+')
         [ -z "$EVENT_ID" ] && continue
@@ -628,7 +729,6 @@ tail -n 0 -F "${AUDIT_LOG}" 2>/dev/null | tr -cd '\11\12\15\40-\176' | while rea
         COMMAND=$(echo "$COMMAND" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
         [ -z "$COMMAND" ] && continue
         
-        # Filter internal sessionwatch calls
         case "$COMMAND" in
             *sessionwatch*|*auditctl*|*augenrules*) continue ;;
         esac
@@ -636,7 +736,6 @@ tail -n 0 -F "${AUDIT_LOG}" 2>/dev/null | tr -cd '\11\12\15\40-\176' | while rea
         COMMAND_SHORT="${COMMAND:0:80}"
         [ ${#COMMAND} -gt 80 ] && COMMAND_SHORT="${COMMAND_SHORT}..."
 
-        # Match against patterns
         MATCHED=0
         while IFS= read -r pattern; do
             [ -z "$pattern" ] && continue
@@ -645,7 +744,6 @@ tail -n 0 -F "${AUDIT_LOG}" 2>/dev/null | tr -cd '\11\12\15\40-\176' | while rea
             if echo "$COMMAND" | grep -qiE "$pattern"; then
                 echo "[$(date '+\%H:\%M:\%S')] ⚠️ MATCH! Pattern: $pattern"
 
-                # Categorize Severity
                 if echo "$COMMAND" | grep -qE "/dev/random|/dev/urandom|/dev/zero|>.*audit\.log|truncate.*audit\.log"; then
                     SEVERITY="CRITICAL"
                     MSG="Log tampering / DoS attempt detected!"
@@ -690,7 +788,6 @@ MONITOR_SCRIPT
     echo ""
 }
 
-# Create Cron Watchdog
 create_watchdog_cron() {
     echo "[8/10] Creating Dual Watchdog cron job (SessionWatch + Auditd)..."
     
@@ -702,7 +799,6 @@ EOF
     echo ""
 }
 
-# Create and lock hardened systemd service & auditd configs
 create_service() {
     echo "[9/10] Creating hardened systemd service & applying file immutability..."
     
@@ -729,7 +825,6 @@ SERVICE
     systemctl enable sessionwatch
     systemctl start sessionwatch
     
-    # Apply immutable flag (+i) to prevent deletion, edit, or chmod -x
     chattr +i /usr/local/bin/sessionwatch-monitor.sh 2>/dev/null || true
     chattr +i /etc/systemd/system/sessionwatch.service 2>/dev/null || true
     chattr +i /etc/systemd/system/auditd.service.d/override.conf 2>/dev/null || true
@@ -749,7 +844,6 @@ SERVICE
     echo ""
 }
 
-# Create uninstall script
 create_uninstall_script() {
     echo "[10/10] Creating uninstaller..."
     cat > /usr/local/bin/uninstall-sessionwatch.sh << 'UNINSTALL_SCRIPT'
@@ -818,6 +912,7 @@ display_summary() {
     echo -e "${GREEN}  ✓ SessionWatch & Auditd Fully Hardened & Installed Successfully!${NC}"
     echo "================================================================================"
     echo ""
+    echo "Version:             v4.1-1"
     echo "Notification Method: ${NOTIFICATION_METHOD^^}"
     echo "Monitoring Engine:   Linux Kernel Auditd (execve tracking)"
     echo "Log Shield Status:   Active (tr -cd sanitization + execve pre-detection)"
@@ -828,9 +923,19 @@ display_summary() {
     echo "  • Auditd Auto-Rotation: max_log_file = 20MB, ROTATE action enforced"
     echo "  • Directory Lock:       /var/log/audit restricted to chmod 700"
     echo ""
+    echo "Wall Notifications (v4.1-1):"
+    echo "  • Broadcasts directly to every writable pty in /dev/pts/*"
+    echo "  • No dependency on the legacy wall(1) utmp lookup (broken on Debian 13+)"
+    echo ""
+    echo "Email Notifications (v4.1-1):"
+    echo "  • Uses msmtp with automatic TLS mode detection (465=implicit, 587=STARTTLS)"
+    echo "  • Account name: sessionwatch  (default target for msmtp -a)"
+    echo "  • Config: /etc/msmtprc — Logs: /var/log/msmtp.log"
+    echo ""
     echo "Useful commands:"
     echo "  • Service status:     systemctl status sessionwatch auditd"
     echo "  • Live alerts log:    tail -f /var/log/sessionwatch/alerts.log"
+    echo "  • Email debug log:    tail -f /var/log/msmtp.log"
     echo "  • Uninstall:          sudo /usr/local/bin/uninstall-sessionwatch.sh"
     echo ""
     echo "================================================================================"
