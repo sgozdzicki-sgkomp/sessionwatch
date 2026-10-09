@@ -48,7 +48,7 @@ Built with an **anti-tamper architecture**, SessionWatch is resilient against pr
 Run `setup.sh` as `root` (or via `sudo`) on your server:
 
 ```bash
-git clone https://github.com/your-username/sessionwatch.git
+git clone git@github.com:sgozdzicki-sgkomp/sessionwatch.git
 cd sessionwatch
 chmod +x setup.sh
 sudo ./setup.sh
