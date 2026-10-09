@@ -49,7 +49,7 @@ Built with an **anti-tamper, self-healing architecture**, SessionWatch is resili
 Run `setup.sh` as `root` (or via `sudo`) on your server:
 
 ```bash
-git clone https://github.com/your-username/sessionwatch.git
+git clone https://github.com/sgozdzicki-sgkomp/sessionwatch.git
 cd sessionwatch
 chmod +x setup.sh
 sudo ./setup.sh
