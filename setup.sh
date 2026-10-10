@@ -1,7 +1,7 @@
 #!/bin/bash
 
 ################################################################################
-# SessionWatch Universal Installer v4.1-1 (Full Self-Healing & Log Shield)
+# SessionWatch Universal Installer v4.2 (Multi-Channel Notifications)
 # Notification Options: Discord, Email, Microsoft Teams, Wall (local)
 # Compatible with: Debian, Ubuntu, CentOS, RHEL, Rocky Linux, AlmaLinux
 ################################################################################
@@ -16,8 +16,8 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 echo "================================================================================"
-echo "   SessionWatch Self-Healing Security Monitor & Auditd Shield v4.1-1"
-echo "           Discord | Email | Teams | Wall Notifications"
+echo "   SessionWatch Self-Healing Security Monitor & Auditd Shield v4.2"
+echo "           Discord | Email | Teams | Wall  (multi-channel)"
 echo "================================================================================"
 echo ""
 
@@ -257,44 +257,67 @@ EOF
     echo ""
 }
 
-# Choose notification method
+# Choose notification method(s) — MULTI-SELECT
 choose_notification_method() {
-    echo "[6/10] Choosing notification method..."
+    echo "[6/10] Choosing notification channel(s)..."
     echo ""
     echo "How would you like to receive security alerts?"
+    echo "You can select MULTIPLE channels (space- or comma-separated)."
+    echo ""
     echo "  1) Discord webhook"
     echo "  2) Email (via msmtp)"
     echo "  3) Microsoft Teams webhook"
     echo "  4) Wall (broadcast to all active ptys in /dev/pts)"
     echo ""
-    echo -n "Enter choice (1-4): "
-    read -r NOTIFY_CHOICE
+    echo "Examples:   1     1,3     1 3     1,2,3,4"
+    echo -n "Enter choice(s): "
+    read -r NOTIFY_CHOICES
     
-    case $NOTIFY_CHOICE in
-        1) NOTIFICATION_METHOD="discord" ;;
-        2) NOTIFICATION_METHOD="email" ;;
-        3) NOTIFICATION_METHOD="teams" ;;
-        4) NOTIFICATION_METHOD="wall" ;;
-        *) NOTIFICATION_METHOD="wall" ;;
-    esac
+    # Normalize commas to spaces
+    NOTIFY_CHOICES=$(echo "$NOTIFY_CHOICES" | tr ',' ' ')
+    
+    NOTIFICATION_METHODS=""
+    for choice in $NOTIFY_CHOICES; do
+        case $choice in
+            1) NOTIFICATION_METHODS="$NOTIFICATION_METHODS discord" ;;
+            2) NOTIFICATION_METHODS="$NOTIFICATION_METHODS email" ;;
+            3) NOTIFICATION_METHODS="$NOTIFICATION_METHODS teams" ;;
+            4) NOTIFICATION_METHODS="$NOTIFICATION_METHODS wall" ;;
+        esac
+    done
+    
+    # Dedupe + trim
+    NOTIFICATION_METHODS=$(echo "$NOTIFICATION_METHODS" | tr ' ' '\n' | awk 'NF && !seen[$0]++' | tr '\n' ' ' | sed 's/^ *//; s/ *$//')
+    
+    if [ -z "$NOTIFICATION_METHODS" ]; then
+        echo -e "${YELLOW}No valid choice — defaulting to wall.${NC}"
+        NOTIFICATION_METHODS="wall"
+    fi
+    
+    echo -e "${GREEN}✓ Selected channel(s): ${NOTIFICATION_METHODS}${NC}"
     echo ""
 }
 
+# Helper: remove a channel from NOTIFICATION_METHODS on skip
+drop_channel() {
+    local ch="$1"
+    NOTIFICATION_METHODS=$(echo "$NOTIFICATION_METHODS" | tr ' ' '\n' | grep -v "^${ch}$" | tr '\n' ' ' | sed 's/^ *//; s/ *$//')
+}
+
 configure_discord() {
-    echo "Configuring Discord webhook..."
+    echo "── Discord ────────────────────────────────────────────"
     echo -n "Enter your Discord Webhook URL: "
     read -r WEBHOOK_URL
     
     if [ -z "$WEBHOOK_URL" ]; then
-        echo -e "${RED}ERROR: Webhook URL cannot be empty${NC}"
-        exit 1
+        echo -e "${RED}Webhook URL empty — skipping Discord channel.${NC}"
+        drop_channel discord
+        return 0
     fi
     
-    cat > /etc/sessionwatch/notification.conf << EOF
-NOTIFICATION_METHOD=discord
-DISCORD_WEBHOOK=${WEBHOOK_URL}
+    cat >> /etc/sessionwatch/notification.conf << EOF
+DISCORD_WEBHOOK="${WEBHOOK_URL}"
 EOF
-    chmod 600 /etc/sessionwatch/notification.conf
     
     HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
         -H "Content-Type: application/json" \
@@ -303,15 +326,15 @@ EOF
         "$WEBHOOK_URL")
     
     if [ "$HTTP_CODE" -eq 204 ] 2>/dev/null || [ "$HTTP_CODE" -eq 200 ] 2>/dev/null; then
-        echo -e "${GREEN}✓ Webhook test successful!${NC}"
+        echo -e "${GREEN}✓ Discord webhook test successful!${NC}"
     else
-        echo -e "${RED}✗ Webhook test failed (HTTP $HTTP_CODE)${NC}"
-        exit 1
+        echo -e "${YELLOW}⚠ Discord webhook test returned HTTP $HTTP_CODE (keeping channel anyway)${NC}"
     fi
+    echo ""
 }
 
 configure_email() {
-    echo "Configuring Email notifications (msmtp)..."
+    echo "── Email (msmtp) ─────────────────────────────────────"
     ${PKG_INSTALL}msmtp msmtp-mta
     
     echo -n "SMTP Server (e.g., smtp.gmail.com): "
@@ -328,12 +351,7 @@ configure_email() {
     read -rs SMTP_PASS
     echo ""
     
-    # ------------------------------------------------------------------
-    # Auto-detect TLS mode from port number:
-    #   465         -> implicit TLS (SMTPS)  -> tls_starttls off
-    #   587 / 25    -> STARTTLS              -> tls_starttls on
-    #   anything    -> assume STARTTLS (safe default for modern servers)
-    # ------------------------------------------------------------------
+    # Auto-detect TLS mode from port number
     case "$SMTP_PORT" in
         465)
             TLS_STARTTLS="off"
@@ -350,7 +368,6 @@ configure_email() {
     esac
     echo -e "  ${GREEN}✓ TLS mode: ${TLS_MODE_DESC} (auto-detected from port ${SMTP_PORT})${NC}"
 
-    # Pick the correct CA bundle per distro
     if [ -f /etc/ssl/certs/ca-certificates.crt ]; then
         CA_FILE="/etc/ssl/certs/ca-certificates.crt"
     elif [ -f /etc/pki/tls/certs/ca-bundle.crt ]; then
@@ -359,15 +376,11 @@ configure_email() {
         CA_FILE=""
     fi
 
-    # Pre-create the log file so it always exists with sane perms
     touch /var/log/msmtp.log
     chmod 640 /var/log/msmtp.log
 
-    # ------------------------------------------------------------------
-    # IMPORTANT: the account is named "sessionwatch" (NOT "default").
-    # Naming it "default" collides with the `account default : <name>`
-    # directive and msmtp exits with code 78 (EX_CONFIG).
-    # ------------------------------------------------------------------
+    # Account is named "sessionwatch" (NOT "default" — that collides with
+    # `account default : <name>` and causes msmtp exit 78 / EX_CONFIG).
     if [ -n "$CA_FILE" ]; then
         cat > /etc/msmtprc << EOF
 # SessionWatch msmtp configuration (auto-generated)
@@ -413,17 +426,12 @@ EOF
     fi
     chmod 600 /etc/msmtprc
     
-    cat > /etc/sessionwatch/notification.conf << EOF
-NOTIFICATION_METHOD=email
-SMTP_FROM=${SMTP_FROM}
-SMTP_TO=${SMTP_TO}
+    cat >> /etc/sessionwatch/notification.conf << EOF
+SMTP_FROM="${SMTP_FROM}"
+SMTP_TO="${SMTP_TO}"
 EOF
-    chmod 600 /etc/sessionwatch/notification.conf
     
-    # ------------------------------------------------------------------
-    # Live test with full stderr capture (set -e disabled locally)
-    # ------------------------------------------------------------------
-    echo ""
+    # Live test
     echo "Sending test email to ${SMTP_TO}..."
     set +e
     TEST_ERR=$(echo -e "Subject: SessionWatch SMTP Test\r\nFrom: ${SMTP_FROM}\r\nTo: ${SMTP_TO}\r\n\r\nThis is a test email from SessionWatch." | msmtp -a sessionwatch "${SMTP_TO}" 2>&1)
@@ -447,46 +455,82 @@ EOF
         echo "  • Port 465 → implicit TLS   (installer sets tls_starttls off)"
         echo "  • Port 587 → STARTTLS        (installer sets tls_starttls on)"
         echo "  • Gmail requires an App Password, not your account password"
-        echo "  • Verify credentials manually:"
+        echo "  • Verify manually:"
         echo "      echo -e 'Subject: test\\r\\n\\r\\nhello' | msmtp -a sessionwatch ${SMTP_TO}"
         echo "  • Check current config:  cat /etc/msmtprc"
         echo ""
-        echo -e "${YELLOW}SessionWatch will continue installing; fix email config later.${NC}"
+        echo -e "${YELLOW}Email channel kept; fix /etc/msmtprc later if needed.${NC}"
     fi
     echo ""
 }
 
 configure_teams() {
-    echo "Configuring Microsoft Teams webhook..."
+    echo "── Microsoft Teams ───────────────────────────────────"
     echo -n "Enter your Microsoft Teams Webhook URL: "
     read -r WEBHOOK_URL
     
-    cat > /etc/sessionwatch/notification.conf << EOF
-NOTIFICATION_METHOD=teams
-TEAMS_WEBHOOK=${WEBHOOK_URL}
+    if [ -z "$WEBHOOK_URL" ]; then
+        echo -e "${RED}Webhook URL empty — skipping Teams channel.${NC}"
+        drop_channel teams
+        return 0
+    fi
+    
+    cat >> /etc/sessionwatch/notification.conf << EOF
+TEAMS_WEBHOOK="${WEBHOOK_URL}"
 EOF
-    chmod 600 /etc/sessionwatch/notification.conf
+    
+    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+        -H "Content-Type: application/json" \
+        -X POST \
+        -d '{"text": "✓ SessionWatch Teams webhook test successful"}' \
+        "$WEBHOOK_URL")
+    
+    if [ "$HTTP_CODE" -eq 200 ] 2>/dev/null || [ "$HTTP_CODE" -eq 202 ] 2>/dev/null; then
+        echo -e "${GREEN}✓ Teams webhook test successful!${NC}"
+    else
+        echo -e "${YELLOW}⚠ Teams webhook test returned HTTP $HTTP_CODE (legacy webhooks often return 200; keeping channel)${NC}"
+    fi
+    echo ""
 }
 
 configure_wall() {
-    cat > /etc/sessionwatch/notification.conf << EOF
-NOTIFICATION_METHOD=wall
-EOF
-    chmod 600 /etc/sessionwatch/notification.conf
+    # Wall has no parameters — nothing to write to the config
+    echo -e "${GREEN}✓ Wall channel enabled (direct pty broadcast).${NC}"
+    echo ""
 }
 
 configure_notifications() {
-    case "$NOTIFICATION_METHOD" in
-        discord) configure_discord ;;
-        email)   configure_email ;;
-        teams)   configure_teams ;;
-        wall)    configure_wall ;;
-    esac
+    # Reset config file
+    > /etc/sessionwatch/notification.conf
+    chmod 600 /etc/sessionwatch/notification.conf
+    
+    # Configure each selected channel (may drop itself on empty input)
+    for method in $NOTIFICATION_METHODS; do
+        case "$method" in
+            discord) configure_discord ;;
+            email)   configure_email ;;
+            teams)   configure_teams ;;
+            wall)    configure_wall ;;
+        esac
+    done
+    
+    # Final safety net
+    if [ -z "$NOTIFICATION_METHODS" ]; then
+        echo -e "${YELLOW}All channels were skipped — defaulting to wall.${NC}"
+        NOTIFICATION_METHODS="wall"
+    fi
+    
+    # Persist the channel list
+    echo "NOTIFICATION_METHODS=\"${NOTIFICATION_METHODS}\"" >> /etc/sessionwatch/notification.conf
+    
+    echo -e "${GREEN}✓ Notification config written to /etc/sessionwatch/notification.conf${NC}"
+    echo -e "${GREEN}  Active channel(s): ${NOTIFICATION_METHODS}${NC}"
+    echo ""
 }
 
-# Create monitoring script (with Binary Stream Sanitization `tr -cd`)
+# Create monitoring script
 create_monitor_script() {
-    echo "[7/10] Creating auditd monitoring script with stream sanitization..."
+    echo "[7/10] Creating auditd monitoring script (multi-channel)..."
     
     cat > /usr/local/bin/sessionwatch-monitor.sh << 'MONITOR_SCRIPT'
 #!/bin/bash
@@ -504,8 +548,20 @@ fi
 
 source ${NOTIFICATION_CONF}
 
+# ------------------------------------------------------------------
+# Backward compatibility:
+#   v4.1 used NOTIFICATION_METHOD="discord" (singular).
+#   v4.2 uses NOTIFICATION_METHODS="discord teams wall" (plural).
+#   If only the singular is present, promote it to a one-element list.
+# ------------------------------------------------------------------
+if [ -z "${NOTIFICATION_METHODS:-}" ] && [ -n "${NOTIFICATION_METHOD:-}" ]; then
+    NOTIFICATION_METHODS="${NOTIFICATION_METHOD}"
+fi
+
 send_discord_alert() {
     local message="$1" severity="$2" user_info="$3" command="$4"
+    [ -z "${DISCORD_WEBHOOK:-}" ] && return 0
+
     case "$severity" in
         "CRITICAL") COLOR="15158332" ;;
         "HIGH")     COLOR="16776960" ;;
@@ -543,7 +599,7 @@ send_discord_alert() {
                     { name: "💻 Command Executed / Event", value: ("```bash\n" + $command + "\n```"), inline: false }
                 ],
                 timestamp: $timestamp,
-                footer: { text: "SessionWatch v4.1-1 (Auditd Hardened)" }
+                footer: { text: "SessionWatch v4.2 (Auditd Hardened)" }
             }]
         }' 2>/dev/null)
     
@@ -552,6 +608,9 @@ send_discord_alert() {
 
 send_email_alert() {
     local message="$1" severity="$2" user_info="$3" command="$4"
+    [ -z "${SMTP_FROM:-}" ] && return 0
+    [ -z "${SMTP_TO:-}" ] && return 0
+
     HOSTNAME=$(hostname)
     TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S %Z')
     
@@ -570,6 +629,8 @@ Command / Event: ${command}
 
 send_teams_alert() {
     local message="$1" severity="$2" user_info="$3" command="$4"
+    [ -z "${TEAMS_WEBHOOK:-}" ] && return 0
+
     HOSTNAME=$(hostname)
     TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S %Z')
     
@@ -642,12 +703,15 @@ send_alert() {
     local message="$1" severity="$2" user_info="$3" command="$4"
     echo "[$(date)] [${severity}]${user_info}: ${command}" >> ${LOG_DIR}/alerts.log
     
-    case "$NOTIFICATION_METHOD" in
-        discord) send_discord_alert "$message" "$severity" "$user_info" "$command" ;;
-        email)   send_email_alert "$message" "$severity" "$user_info" "$command" ;;
-        teams)   send_teams_alert "$message" "$severity" "$user_info" "$command" ;;
-        wall)    send_wall_alert "$message" "$severity" "$user_info" "$command" ;;
-    esac
+    # Fan out to every configured channel
+    for method in ${NOTIFICATION_METHODS}; do
+        case "$method" in
+            discord) send_discord_alert "$message" "$severity" "$user_info" "$command" || true ;;
+            email)   send_email_alert   "$message" "$severity" "$user_info" "$command" || true ;;
+            teams)   send_teams_alert   "$message" "$severity" "$user_info" "$command" || true ;;
+            wall)    send_wall_alert    "$message" "$severity" "$user_info" "$command" || true ;;
+        esac
+    done
 }
 
 cleanup() {
@@ -672,6 +736,7 @@ fi
 
 echo "RUNNING" > "${STATE_FILE}"
 echo "SessionWatch kernel monitoring active."
+echo "Notification channels: ${NOTIFICATION_METHODS}"
 
 declare -A USER_MAP
 
@@ -912,10 +977,20 @@ display_summary() {
     echo -e "${GREEN}  ✓ SessionWatch & Auditd Fully Hardened & Installed Successfully!${NC}"
     echo "================================================================================"
     echo ""
-    echo "Version:             v4.1-1"
-    echo "Notification Method: ${NOTIFICATION_METHOD^^}"
+    echo "Version:             v4.2"
     echo "Monitoring Engine:   Linux Kernel Auditd (execve tracking)"
     echo "Log Shield Status:   Active (tr -cd sanitization + execve pre-detection)"
+    echo ""
+    echo "Notification Channel(s):"
+    for m in $NOTIFICATION_METHODS; do
+        case "$m" in
+            discord) echo "  • Discord  (webhook)" ;;
+            email)   echo "  • Email    (msmtp, /etc/msmtprc, log /var/log/msmtp.log)" ;;
+            teams)   echo "  • Teams    (webhook)" ;;
+            wall)    echo "  • Wall     (direct /dev/pts/* broadcast)" ;;
+        esac
+    done
+    echo "  Config: /etc/sessionwatch/notification.conf"
     echo ""
     echo "Log Tampering Protections:"
     echo "  • Stream Sanitization:  Binary characters (\0, etc.) filtered out instantly"
@@ -923,18 +998,10 @@ display_summary() {
     echo "  • Auditd Auto-Rotation: max_log_file = 20MB, ROTATE action enforced"
     echo "  • Directory Lock:       /var/log/audit restricted to chmod 700"
     echo ""
-    echo "Wall Notifications (v4.1-1):"
-    echo "  • Broadcasts directly to every writable pty in /dev/pts/*"
-    echo "  • No dependency on the legacy wall(1) utmp lookup (broken on Debian 13+)"
-    echo ""
-    echo "Email Notifications (v4.1-1):"
-    echo "  • Uses msmtp with automatic TLS mode detection (465=implicit, 587=STARTTLS)"
-    echo "  • Account name: sessionwatch  (default target for msmtp -a)"
-    echo "  • Config: /etc/msmtprc — Logs: /var/log/msmtp.log"
-    echo ""
     echo "Useful commands:"
     echo "  • Service status:     systemctl status sessionwatch auditd"
     echo "  • Live alerts log:    tail -f /var/log/sessionwatch/alerts.log"
+    echo "  • Show channels:      cat /etc/sessionwatch/notification.conf"
     echo "  • Email debug log:    tail -f /var/log/msmtp.log"
     echo "  • Uninstall:          sudo /usr/local/bin/uninstall-sessionwatch.sh"
     echo ""

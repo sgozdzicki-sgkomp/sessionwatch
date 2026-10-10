@@ -1,90 +1,77 @@
-# 🛡️ SessionWatch v4.1-1 — Hardened Kernel Security Monitor & Log Shield
+# 🛡️ SessionWatch v4.2 — Hardened Kernel Security Monitor & Multi-Channel Alerts
 
-**SessionWatch** is a lightweight, real-time security monitoring tool for Linux servers. It operates at the kernel level using `auditd` to capture system command executions (`execve`), evaluating them against customizable security patterns and instantly delivering rich alerts to **Discord, Microsoft Teams, Email, or local terminals (`wall`)**.
+**SessionWatch** is a lightweight, real-time security monitoring tool for Linux servers. It operates at the kernel level using `auditd` to capture system command executions (`execve`), evaluating them against customizable security patterns and instantly delivering rich alerts to **multiple channels at once** — **Discord, Microsoft Teams, Email, and local terminals (`wall`)**.
 
 Built with an **anti-tamper, self-healing architecture**, SessionWatch is resilient against process termination (`kill -9`), service stops (`systemctl stop`), executable permission stripping (`chmod -x`), **log destruction / DoS attempts against auditd**, and — crucially — **it detects and alerts you when someone tries to tamper with it, with `auditd`, or with the audit log itself**.
 
 ---
 
-## 🆕 What's New in v4.1-1 (vs. v4.0 / v4.1)
+## 🆕 What's New in v4.2 (vs. v4.1-1)
 
-v4.1-1 is a **maintenance release** addressing three long-standing runtime issues on modern Linux distributions.
+### 📢 Multi-Channel Notifications
 
-### 📧 Fix: msmtp — `account default was already defined` (exit code 78)
+You can now notify **any combination** of Discord, Email, Teams and Wall simultaneously. Every alert fans out to all configured channels.
 
-The first v4.1-1 email build generated an `/etc/msmtprc` that named the SMTP account `default`:
+- Installer prompt accepts multiple selections: `1`, `1,3`, `1 3`, `1,2,3,4`, etc.
+- New config format in `/etc/sessionwatch/notification.conf`:
 
-```
-account        default       ← definition of an account called "default"
-...
-account default : default    ← try to set "default" as the default account
-```
+  ```ini
+  DISCORD_WEBHOOK="https://discord.com/api/webhooks/..."
+  TEAMS_WEBHOOK="https://..."
+  SMTP_FROM="you@example.com"
+  SMTP_TO="you@example.com"
+  NOTIFICATION_METHODS="discord teams wall"
+  ```
 
-`account default : <name>` is msmtp's directive for *selecting* which of the defined accounts is the default. Naming the account itself `default` makes msmtp parse the second line as **a second definition** of the same account and abort with:
+- Only the channels listed in `NOTIFICATION_METHODS` are used. Empty channels are silently skipped (e.g., if you enter nothing for the Discord webhook, Discord is dropped from the list).
+- The startup banner prints the configured channel list for easy verification.
+- `send_alert()` iterates the list and calls each channel's sender with `|| true` so a failing channel never blocks the others.
 
-```
-msmtp: /etc/msmtprc: line 18: account default was already defined
-msmtp exit code 78 (EX_CONFIG)
-```
+### 🔁 Backwards Compatibility
 
-**v4.1-1 now names the account `sessionwatch`** and refers to it consistently:
-
-```
-account        sessionwatch
-...
-account default : sessionwatch
-```
-
-All `msmtp` invocations (installer test, `send_email_alert()`, documentation) use `msmtp -a sessionwatch`. The summary banner in `setup.sh` also reports the account name for easier debugging.
-
-If you already deployed a broken build, you can either re-run `setup.sh` or patch in place:
+The monitor script **still honours the old `NOTIFICATION_METHOD` (singular)** variable:
 
 ```bash
-sudo chattr -i /usr/local/bin/sessionwatch-monitor.sh
-sudo sed -i 's/^account        default$/account        sessionwatch/' /etc/msmtprc
-sudo sed -i 's|^account default : default$|account default : sessionwatch|' /etc/msmtprc
-sudo sed -i 's/msmtp -a default/msmtp -a sessionwatch/g' /usr/local/bin/sessionwatch-monitor.sh
-sudo chattr +i /usr/local/bin/sessionwatch-monitor.sh
+if [ -z "${NOTIFICATION_METHODS:-}" ] && [ -n "${NOTIFICATION_METHOD:-}" ]; then
+    NOTIFICATION_METHODS="${NOTIFICATION_METHOD}"
+fi
 ```
 
-### 📧 Fix: Email notifications — automatic TLS mode detection
+Any v4.1-1 installation will keep working without reinstalling — but to use multi-channel, run the v4.2 installer.
 
-The initial `msmtp` rollout failed silently on **port 465 (implicit TLS / SMTPS)** because the generated `/etc/msmtprc` only had `tls on`, which in `msmtp` defaults to **STARTTLS** (plaintext first, then upgrade). Servers listening on 465 expect TLS from the first byte and never send a `STARTTLS` capability — the connection dies before `msmtp` even opens the log file. That is why `/var/log/msmtp.log` was missing entirely.
+### ✅ Teams webhook now tested
 
-**v4.1-1 auto-detects the TLS mode from the port number:**
+The installer now performs a live test against the Teams webhook and reports the HTTP status (legacy webhooks often return `200`, newer ones may return `202`). Misconfigurations are visible immediately, not at first alert time.
 
-| Port | TLS Mode | `tls_starttls` |
-| :--- | :--- | :--- |
-| `465` | Implicit TLS (SMTPS) | `off` |
-| `587`, `25`, `2525` | STARTTLS | `on` |
-| anything else | STARTTLS (assumed) | `on` |
+### 🔧 Carried over from v4.1-1
 
-Additional improvements:
+- **msmtp** replaces `esmtp`; SMTP account named `sessionwatch` (fixes exit code 78).
+- **Automatic TLS mode** — port 465 = implicit TLS, 587/25 = STARTTLS.
+- **Wall** broadcasts directly to `/dev/pts/*` (fixes Debian 13 silent failure).
+- **Discord** webhook test uses real `||` (fixes v4.0 `\vert{}` escaping).
 
-- **CA bundle auto-detection** — uses `/etc/ssl/certs/ca-certificates.crt` on Debian/Ubuntu and `/etc/pki/tls/certs/ca-bundle.crt` on RHEL/CentOS, with a `tls_trust_file system` fallback.
-- **`/var/log/msmtp.log` is pre-created** with mode `640` before the live test, so it always exists for debugging.
-- **Live test now shows the real error** — stderr from `msmtp` is captured (previously swallowed by `2>/dev/null`), printed, followed by the last 10 lines of the log and concrete hints (port/TLS mismatch, Gmail App Password, manual test command).
-- **Installer no longer aborts on email failure** — it prints a warning and continues, so you can fix `/etc/msmtprc` after install and `systemctl restart sessionwatch`.
+---
 
-### 📧 Fix: Email notifications rewritten for msmtp (vs. `esmtp`)
+## 🆕 What's New in v4.1-1 (vs. v4.0 / v4.1)
 
-The original `esmtp`-based delivery silently failed on Gmail, Office365, and most modern SMTP servers because:
+### 📧 Email: `msmtp`, automatic TLS mode, `sessionwatch` account
 
-- `esmtp` does not correctly negotiate **STARTTLS** with servers that require it.
-- It has no built-in TLS certificate validation.
-- Errors were swallowed by `2>/dev/null`, making it impossible to debug.
+- **Fix: `account default was already defined` (exit 78)** — the account is now named `sessionwatch` instead of `default`. This avoids a collision with msmtp's `account default : <name>` directive. All sends use `msmtp -a sessionwatch <recipient>`.
+- **Fix: implicit TLS on port 465** — `tls_starttls` is now set from the port number:
 
-**v4.1-1 uses `msmtp`** — a modern, actively maintained SMTP client with full TLS/STARTTLS support.
+  | Port | TLS mode | `tls_starttls` |
+  | :--- | :--- | :--- |
+  | `465` | Implicit TLS (SMTPS) | `off` |
+  | `587`, `25`, `2525` | STARTTLS | `on` |
+  | other | STARTTLS (assumed) | `on` |
 
-- Config: **`/etc/msmtprc`** (mode 600).
-- Log: **`/var/log/msmtp.log`** (mode 640).
-- `send_email_alert()` uses `msmtp -a sessionwatch <recipient>`.
+- CA bundle auto-detection (`ca-certificates.crt` on Debian, `ca-bundle.crt` on RHEL).
+- `/var/log/msmtp.log` is pre-created with mode `640`.
+- Live test now prints msmtp's real stderr instead of swallowing it; the installer continues on failure and tells you how to fix it.
 
-### 🔧 Fix: `wall` notification rewritten for modern Linux
+### 🔧 Wall: direct pty broadcast
 
-Debian 13 (Trixie) ships a `wall(1)` that no longer reliably delivers to interactive ptys — it still targets the legacy `utmp` database, which is typically empty on modern systemd hosts. Users selecting **option 4 (Wall)** during install were getting **silent failures**.
-
-`send_wall_alert()` now broadcasts **directly to every writable pty** in `/dev/pts/*`:
+`wall(1)` on Debian 13 / util-linux 2.40+ no longer delivers to interactive ptys reliably (utmp is empty). `send_wall_alert()` now writes directly:
 
 ```bash
 for pts in /dev/pts/[0-9]*; do
@@ -93,81 +80,35 @@ for pts in /dev/pts/[0-9]*; do
 done
 ```
 
-- No dependency on `wall(1)` or `utmp`.
-- Works on Debian 13, Ubuntu 24.04+, RHEL 10, and any host with a standard `/dev/pts` mount.
-- Silently skips ptys that are not writable.
+### 🐛 Discord: `\vert{}` escaping fix
 
-### 🔁 Backwards Compatibility
-
-- **No breaking changes vs. v4.1.** Drop-in replacement.
-- If you are on v4.0 or v4.1, run the uninstaller and reinstall:
-  ```bash
-  sudo /usr/local/bin/uninstall-sessionwatch.sh   # type "yes"
-  git pull && sudo ./setup.sh
-  ```
+v4.0 shipped Markdown-escaped pipe characters (`\vert{}` instead of `|`) in the `configure_discord()` HTTP test, causing **every valid Discord webhook (HTTP 204) to be reported as a failure and abort the installer**. Same artefact broke the monitor's parser and privilege-escalation regex. All instances now use real `|` / `||`.
 
 ---
 
 ## 🆕 What's New in v4.1 (vs. v4.0)
 
-v4.1 was a **hardening + bug-fix release** on top of the v4.0 stable branch. It added an active **Log Shield** layer and fixed a critical escaping bug that broke Discord webhook verification.
+v4.1 added the **Log Shield** layer.
 
-### 🐛 Critical Fixes
-
-- **Fixed `\vert{}` escaping bug** — v4.0 shipped with Markdown/JSON-escaped pipe characters (`\vert{}` instead of `|`, `\vert{}\vert{}` instead of `||`) in several places:
-  - `configure_discord()` HTTP test → condition was always false, so a **valid Discord webhook (HTTP 204) was reported as a failure and aborted the installer**.
-  - Inside the generated `sessionwatch-monitor.sh` heredoc → the decoded command pipeline (`| xxd`, `| sed`, `| grep`) and the privilege-escalation regex would have failed at runtime.
-  - All occurrences replaced with real `|` / `||`. Verified with `grep -n 'vert{}' setup.sh` (should return nothing).
-
-### 🛡️ New: Log Shield (Anti-Tamper for Audit Logs)
-
-- **Binary Stream Sanitization** — `tail -F audit.log` output is now piped through `tr -cd '\11\12\15\40-\176'` before parsing. This strips NUL bytes and other binary junk that could corrupt Bash `read`, desynchronize the SYSCALL ↔ EXECVE event map, or crash the parser when an attacker writes binary garbage into the audit stream.
-- **New CRITICAL patterns** targeting log destruction & DoS:
-  - `/dev/random`, `/dev/urandom`, `/dev/zero` (log-flooding / entropy drain)
-  - `>.*audit\.log`, `>>.*audit\.log`, `truncate.*audit\.log`, `rm.*audit\.log` (truncation / deletion)
-- **New severity branch** — Log tampering / DoS is evaluated **first**, before the sessionwatch/auditd tamper branch, and is always escalated to **CRITICAL** with the message `Log tampering / DoS attempt detected!`.
-
-### ⚙️ New: Auditd Rotation & DoS Prevention
-
-`configure_auditd_rules()` now hardens `/etc/audit/auditd.conf` against disk saturation (e.g. attacker spamming `/dev/urandom` into `audit.log`):
-
-| Directive | v4.0 | v4.1 |
-| :--- | :--- | :--- |
-| `max_log_file` | *(default)* | **`20`** MB |
-| `num_logs` | *(default)* | **`5`** |
-| `max_log_file_action` | *(default)* | **`ROTATE`** |
-| `space_left_action` | *(default)* | **`SYSLOG`** |
-| `admin_space_left_action` | *(default)* | **`SUSPEND`** |
-
-### 📁 New: `/var/log/audit` Directory Lock
-
-`create_directories()` now also creates `/var/log/audit` and locks it down:
-
-```bash
-mkdir -p /var/log/audit
-chmod 700 /var/log/audit
-```
+- **Binary Stream Sanitization** — `tail -F audit.log` is piped through `tr -cd '\11\12\15\40-\176'` to strip NUL bytes and binary junk before parsing.
+- **New CRITICAL log-tampering patterns** — `/dev/random`, `/dev/urandom`, `/dev/zero`, `> audit.log`, `truncate audit.log`, `rm audit.log`. Log tampering is now evaluated **before** the service-tampering branch and is always escalated to **CRITICAL**.
+- **Auditd rotation hardening** — `/etc/audit/auditd.conf` gets `max_log_file=20`, `num_logs=5`, `max_log_file_action=ROTATE`, `space_left_action=SYSLOG`, `admin_space_left_action=SUSPEND`.
+- **`/var/log/audit`** is now created with `chmod 700`.
 
 ---
 
 ## ✨ Features
 
-- **Kernel-Level Tracking (`auditd`)** — Monitors binary executions (`execve`) directly inside the Linux kernel for all users (`auid >= 1000`). Bypasses shell-level anti-forensics (e.g., `trap - DEBUG`, `HISTFILE=/dev/null`, or switching from `bash` to `zsh`/`python`).
-- **Log Shield** — Binary-stream sanitization (`tr -cd`) plus pre-execution CRITICAL alerts on any command that targets the audit log directly (`/dev/random`, `> audit.log`, `truncate audit.log`, `rm audit.log`).
-- **Tamper Alerts** — Every attempt to `stop`, `disable`, `mask`, `kill`, or otherwise interfere with **SessionWatch** or **auditd** is detected and sent as a **HIGH** severity alert. Even successful kills trigger a "resurrected" notification on restart.
-- **Auditd Lifecycle Monitoring** — `type=DAEMON_START` and `type=DAEMON_END` events in the audit log trigger alerts:
-  - `DAEMON_END` → **CRITICAL** (auditd was stopped or crashed)
-  - `DAEMON_START` → **HIGH** (auditd started or auto-recovered)
-- **Immutable Audit Kernel Lock** — Audit rules are loaded with the `-e 2` flag, which locks the kernel audit configuration until reboot. Even `root` cannot unload or modify audit rules at runtime.
-- **Auditd Rotation Limits** — `/etc/audit/auditd.conf` hard-capped at 20 MB × 5 rotations to prevent disk-fill DoS via `/dev/urandom`.
-- **Anti-Tamper & Hardening**
-  - **File Immutability (`chattr +i`)** — Locks the monitor binary, systemd unit, auditd override, audit rules, `auditd.conf`, cron watchdog, and alert patterns against modification, deletion, or permission changes.
-  - **Dual Systemd Stop Protection (`RefuseManualStop=yes`)** — Applied to **both** `sessionwatch.service` **and** `auditd.service` (via drop-in override).
-  - **Instant Process Recovery** — Restarts in less than 1 second (`RestartSec=1`) if forcefully killed.
-  - **Dual Cron Watchdog** — Every minute: restores `+x` on the monitor binary, re-enables/restarts `auditd` if down, and re-enables/restarts `sessionwatch` if down.
-- **Categorized Threat Detection** — Alerts on system logins, privilege escalations, suspicious scripts, backdoors, and destructive commands.
-- **Multi-Channel Notifications** — Rich Discord Embeds, Microsoft Teams MessageCards, Formatted SMTP Emails via **msmtp** (auto-detected TLS mode, dedicated `sessionwatch` account), Local Terminal Broadcasts (**direct pty write — no `wall(1)` dependency**).
-- **Universal Linux Compatibility** — Automated installation for Debian, Ubuntu, RHEL, CentOS, Rocky Linux, AlmaLinux, and Fedora.
+- **Kernel-Level Tracking (`auditd`)** — Monitors `execve` calls inside the kernel for all real users (`auid >= 1000`). Bypasses shell-level anti-forensics (`trap - DEBUG`, `HISTFILE=/dev/null`, shell swaps, etc.).
+- **Multi-Channel Alerts** — Send the same alert to Discord, Teams, Email and Wall at once. Each channel is independent — a failing channel never blocks the others.
+- **Log Shield** — Binary-stream sanitization (`tr -cd`) plus pre-execution CRITICAL alerts for commands targeting the audit log.
+- **Tamper Alerts** — Attempts to `stop`, `disable`, `mask`, `kill`, or otherwise interfere with SessionWatch or auditd are alerted as **HIGH**. Kill-resurrect produces a "resurrected daemon" alert.
+- **Auditd Lifecycle Monitoring** — `type=DAEMON_END` → **CRITICAL**; `type=DAEMON_START` → **HIGH**.
+- **Immutable Audit Kernel Lock** — Rules loaded with `-e 2` (kernel-level lock until reboot).
+- **Auditd Rotation Limits** — 20 MB × 5 rotations cap, prevents `/dev/urandom` disk-fill DoS.
+- **Anti-Tamper Hardening** — `chattr +i` on 7 critical files; dual `RefuseManualStop=yes` (sessionwatch + auditd); `RestartSec=1`; dual cron watchdog (re-asserts `+x`, restarts either service if down).
+- **Categorized Threat Detection** — INFO / WARNING / MEDIUM / HIGH / CRITICAL with sensible defaults.
+- **Universal Linux** — Debian, Ubuntu, RHEL, CentOS, Rocky, AlmaLinux, Fedora.
 
 ---
 
@@ -175,24 +116,22 @@ chmod 700 /var/log/audit
 
 | Severity | Color | Example Triggers & Events |
 | :--- | :--- | :--- |
-| ℹ️ **INFO** | 🔵 Blue | **System Logins**: `sshd`, `/bin/login`, PAM authentication; **Service start**: SessionWatch daemon started |
-| ⚠️ **WARNING** | 🟡 Yellow | **Root Privilege Escalation**: `sudo`, `su`, `doas`, `pkexec`, `runuser` |
-| 🟡 **MEDIUM** | 🟡 Yellow | **Suspicious Activity**: `chmod 777`, `wget \| bash`, disabling firewalls, clearing history, inline `python -c` / `perl -e` / `php -r`, fork bombs |
-| 🟠 **HIGH** | 🟠 Orange | **Tamper & Backdoors**: `/etc/shadow` access, reverse shells (`nc -e`, `pty.spawn`), **any attempt to stop/kill/mask `sessionwatch` or `auditd`**, process resurrection after `kill -9`, `DAEMON_START` events |
-| 🔴 **CRITICAL** | 🔴 Red | **Filesystem Destruction**: `rm -rf /`, `dd if=/dev/zero`, `mkfs`, `shred`; **`auditd` daemon termination** (`DAEMON_END`); **Log tampering / DoS** (`/dev/random`, `/dev/urandom`, `/dev/zero`, `> audit.log`, `truncate audit.log`, `rm audit.log`) |
+| ℹ️ **INFO** | 🔵 Blue | System logins (`sshd`, `/bin/login`, PAM); SessionWatch daemon started |
+| ⚠️ **WARNING** | 🟡 Yellow | Root privilege escalation: `sudo`, `su`, `doas`, `pkexec`, `runuser` |
+| 🟡 **MEDIUM** | 🟡 Yellow | `chmod 777`, `wget \| bash`, disabling firewalls, clearing history, inline `python -c` / `perl -e` / `php -r`, fork bombs |
+| 🟠 **HIGH** | 🟠 Orange | `/etc/shadow` access, reverse shells (`nc -e`, `pty.spawn`), tamper attempts on `sessionwatch`/`auditd`, process resurrection, `DAEMON_START` |
+| 🔴 **CRITICAL** | 🔴 Red | `rm -rf /`, `dd if=/dev/zero`, `mkfs`, `shred`; `DAEMON_END`; log tampering / DoS (`/dev/random`, `/dev/urandom`, `/dev/zero`, `> audit.log`, `truncate audit.log`, `rm audit.log`) |
 
 ---
 
 ## 🐧 Supported Operating Systems
 
-- **Debian / Ubuntu** (including **Debian 13 "Trixie"** — `wall` fix landed in v4.1-1)
+- **Debian / Ubuntu** (including **Debian 13 "Trixie"**)
 - **RHEL / CentOS / Rocky Linux / AlmaLinux / Fedora**
 
 ---
 
 ## 📦 Installation
-
-Run `setup.sh` as `root` (or via `sudo`) on your server:
 
 ```bash
 git clone https://github.com/sgozdzicki-sgkomp/sessionwatch.git
@@ -201,26 +140,42 @@ chmod +x setup.sh
 sudo ./setup.sh
 ```
 
-### What `setup.sh` does automatically
+### Installer flow
 
-1. Detects OS and installs dependencies (`auditd`, `jq`, `curl`, `xxd`, `cron`, and optionally `msmtp` + `msmtp-mta` for email).
-2. Creates directories (`/etc/sessionwatch`, `/var/log/sessionwatch`, `/var/log/audit` with `chmod 700`) and removes legacy profile hooks.
-3. Configures kernel audit rules (`/etc/audit/rules.d/sessionwatch.rules`) and locks them with **`-e 2`**. Hardens `/etc/audit/auditd.conf` with rotation limits.
-4. Hardens the `auditd` systemd unit with a drop-in (`RefuseManualStop=yes`, `Restart=always`, `RestartSec=1`).
-5. Deploys threat patterns (`/etc/sessionwatch/alert-patterns.txt`) — including **service tampering** and **log destruction / DoS** patterns.
-6. Guides you through notification setup (Discord / Email via msmtp / Teams / Wall) with a **live test that shows the real error**.
-7. Deploys the audit parser daemon with **self-healing / resurrection detection**, **auditd lifecycle monitoring**, **binary stream sanitization** (`tr -cd`), and **direct pty broadcast** for Wall.
-8. Installs the **dual watchdog cron job** (`/etc/cron.d/sessionwatch-watchdog`).
-9. Enables the hardened `sessionwatch.service` and applies **`chattr +i`** to all critical files.
-10. Creates the uninstaller at `/usr/local/bin/uninstall-sessionwatch.sh`.
+1. Detects OS, installs `auditd`, `jq`, `curl`, `xxd`, `cron` (and `msmtp`+`msmtp-mta` if Email is chosen).
+2. Creates `/etc/sessionwatch`, `/var/log/sessionwatch`, `/var/log/audit` (mode 700).
+3. Loads kernel audit rules (`-e 2`), hardens `auditd.conf` rotation, drops in `auditd.service.d/override.conf` (`RefuseManualStop=yes`, `Restart=always`, `RestartSec=1`).
+4. Deploys alert patterns.
+5. **Asks for notification channels** (multi-select) and configures each.
+6. Deploys `/usr/local/bin/sessionwatch-monitor.sh`.
+7. Installs `/etc/cron.d/sessionwatch-watchdog`.
+8. Starts hardened `sessionwatch.service`, applies `chattr +i` to critical files.
+9. Creates `/usr/local/bin/uninstall-sessionwatch.sh`.
+
+### Choosing notification channels
+
+```
+How would you like to receive security alerts?
+You can select MULTIPLE channels (space- or comma-separated).
+
+  1) Discord webhook
+  2) Email (via msmtp)
+  3) Microsoft Teams webhook
+  4) Wall (broadcast to all active ptys in /dev/pts)
+
+Examples:   1     1,3     1 3     1,2,3,4
+Enter choice(s):
+```
+
+Each selected channel is configured and live-tested. If a channel is skipped (empty input), it is removed from the list. If all channels are skipped, `wall` is used as a fallback.
 
 ---
 
 ## 📧 Email Configuration (msmtp)
 
-When you choose **option 2) Email** during installation, SessionWatch configures `msmtp`, writes `/etc/msmtprc`, and sends a live test email. TLS mode is **auto-detected from the port**.
+When **Email** is selected, the installer writes `/etc/msmtprc`, then sends a live test.
 
-### How the config is structured
+### Config structure
 
 ```ini
 # /etc/msmtprc
@@ -243,11 +198,11 @@ password       ••••••••
 account default : sessionwatch
 ```
 
-> ⚠️ The account is named **`sessionwatch`**, not `default`. Naming it `default` collides with the `account default : <name>` directive and makes msmtp exit with code 78 (`EX_CONFIG`). All calls use `msmtp -a sessionwatch <recipient>`.
+> ⚠️ The account is named **`sessionwatch`**, not `default`. Naming it `default` collides with msmtp's `account default : <name>` directive and makes msmtp exit with code 78 (`EX_CONFIG`). All sends use `msmtp -a sessionwatch <recipient>`.
 
 ### Port → TLS mapping
 
-| Your SMTP port | TLS mode used | Typical provider |
+| Your SMTP port | TLS mode | Typical provider |
 | :--- | :--- | :--- |
 | **465** | Implicit TLS (SMTPS) | Many dedicated mail servers, some Office365 setups |
 | **587** | STARTTLS | Gmail, Office365, Fastmail, most modern hosts |
@@ -255,155 +210,137 @@ account default : sessionwatch
 
 ### Gmail
 
-1. Enable 2-Step Verification on your Google account.
-2. Generate an **App Password** (Google Account → Security → App passwords → "Mail" → "Other").
-3. Use the 16-character App Password during install (not your regular Gmail password).
-4. SMTP host: `smtp.gmail.com`, Port: `587`.
-
-### Custom SMTP (e.g., `mailhost.example.com:465`)
-
-- Just enter the host and port — the installer picks implicit TLS automatically.
-- After install, verify: `cat /etc/msmtprc` should contain `tls_starttls off` and `account sessionwatch`.
+1. Enable 2-Step Verification.
+2. Generate an **App Password** (Google Account → Security → App passwords → Mail → Other).
+3. Use the 16-character App Password during install.
+4. Host: `smtp.gmail.com`, Port: `587`.
 
 ### Verify the config
 
 ```bash
-# Show what the installer generated
 cat /etc/msmtprc
-
-# Manual test send (note the -a sessionwatch account selector)
 echo -e "Subject: test\r\nFrom: you@example.com\r\nTo: you@example.com\r\n\r\nhello" \
   | msmtp -a sessionwatch you@example.com
-
-# Watch the debug log (all attempts are logged)
 tail -f /var/log/msmtp.log
 ```
-
-### If your server uses a self-signed certificate
-
-Edit `/etc/msmtprc` and replace the `tls_trust_file` line with:
-
-```
-tls_trust_file /path/to/your/ca.pem
-```
-
-or, as a last resort on trusted internal networks only:
-
-```
-tls_trust_file system   # uses system trust store (msmtp ≥ 1.8.20)
-# or disable verification entirely:
-# tls_trust_file /dev/null
-```
-
-Then `systemctl restart sessionwatch`.
 
 ### Common msmtp exit codes
 
 | Code | Meaning | Typical cause |
 | :--- | :--- | :--- |
 | `0` | Success | — |
-| `1` | Network / connection error | Wrong host/port, firewall |
+| `1` | Network error | Wrong host/port, firewall |
 | `4` | Authentication failure | Wrong password, Gmail password instead of App Password |
-| `77` | TLS error | `tls_starttls` mismatch (465 vs 587), untrusted certificate |
-| `78` | Config error (`EX_CONFIG`) | `/etc/msmtprc` syntax problem — e.g. account name collision |
+| `77` | TLS error | `tls_starttls` mismatch (465 vs 587), untrusted cert |
+| `78` | Config error (`EX_CONFIG`) | `/etc/msmtprc` syntax problem — e.g., account name collision |
 
 ---
 
-## 🔒 Anti-Tamper Security Architecture
+## 📄 `notification.conf` — Multi-Channel Format
 
-SessionWatch implements a **multi-layer defense mechanism** against local tampering, log destruction, and service evasion:
+```ini
+# /etc/sessionwatch/notification.conf (mode 600)
+DISCORD_WEBHOOK="https://discord.com/api/webhooks/..."
+TEAMS_WEBHOOK="https://..."
+SMTP_FROM="you@example.com"
+SMTP_TO="you@example.com"
+NOTIFICATION_METHODS="discord teams wall"
+```
+
+The monitor `source`s this file at startup. Only channels in `NOTIFICATION_METHODS` are dispatched. Empty variables are tolerated (the corresponding sender is a no-op).
+
+To change channels later:
+
+```bash
+sudo chattr -i /etc/sessionwatch/notification.conf 2>/dev/null || true
+sudo nano /etc/sessionwatch/notification.conf
+sudo systemctl restart sessionwatch
+```
+
+---
+
+## 🔒 Anti-Tamper Architecture
 
 ```
 [ User/Attacker Command ]
            │
            ▼
-[ Kernel Auditd (execve) ] ──▶ Unbypassable tracking (ignores trap - DEBUG & HISTFILE)
-           │                    Rules locked in-kernel with `-e 2`
-           │                    Rotation capped at 20MB × 5 (DoS shield)
+[ Kernel Auditd (execve) ] ──▶ Unbypassable (ignores trap - DEBUG & HISTFILE)
+           │                    Rules locked with `-e 2`
+           │                    Rotation capped at 20MB × 5
            ▼
-[ SessionWatch Daemon ]   ──▶ Locked with chattr +i (prevents chmod -x & rm)
-           │                    Detects auditd DAEMON_START / DAEMON_END
-           │                    Emits "resurrected" alert after kill -9
-           │                    Sanitizes binary stream with `tr -cd`
-           │                    CRITICAL alerts on log tampering patterns
+[ SessionWatch Daemon ]   ──▶ chattr +i (blocks chmod -x & rm)
+           │                    DAEMON_START / DAEMON_END detection
+           │                    "Resurrected" alert after kill -9
+           │                    tr -cd binary stream sanitization
+           │                    CRITICAL on log tampering patterns
            ▼
-[ Systemd Service ]       ──▶ Protected by RefuseManualStop=yes & RestartSec=1
-           ▲                    (applied to BOTH sessionwatch AND auditd)
-           │ (Checks status every 60s)
-[ Watchdog Cron Job ]     ──▶ Re-chmod +x, restarts sessionwatch or auditd if down
+[ Systemd Service ]       ──▶ RefuseManualStop=yes + RestartSec=1
+           ▲                    (applies to BOTH sessionwatch AND auditd)
+           │ (60s tick)
+[ Watchdog Cron ]         ──▶ re-chmod +x; restart either service if down
 ```
-
-- **Kernel Level Monitoring** — `auditd` captures executions at the system call level.
-- **Immutable Audit Rules (`-e 2`)** — Once loaded, the kernel rejects any further audit rule changes until reboot.
-- **Log Shield** — Audit log stream is sanitized of binary junk (`tr -cd`) and `/var/log/audit` is `chmod 700`.
-- **File Immutability** — Key files are locked with `chattr +i`.
-- **Dual Service Shielding** — `RefuseManualStop=yes` blocks `systemctl stop` on both `sessionwatch` **and** `auditd`.
-- **Self-Healing + Alerts** — If SessionWatch is killed, systemd restarts it in ≤1s and it sends a **HIGH** alert.
-- **Dual Cron Watchdog** — Every minute the cron re-asserts `+x` on the monitor binary and verifies both services.
 
 ---
 
 ## 🧪 Testing Alerts
 
 ```bash
-# 1. Test WARNING Alert (Root Escalation)
+# 1. WARNING — root escalation
 sudo whoami
 
-# 2. Test CRITICAL Alert (Filesystem Hazard Pattern)
+# 2. CRITICAL — filesystem hazard pattern
 rm -rf /tmp/fake_test_directory
 
-# 3. Test HIGH Alert (Tamper / Stop Attempt on auditd)
+# 3. HIGH — tamper / stop attempt on auditd
 sudo systemctl stop auditd
-#   → RefuseManualStop blocks it AND a HIGH alert is sent
+#   → RefuseManualStop blocks it AND a HIGH alert fans out to all channels
 
-# 4. Test HIGH Alert (Process Resurrection)
+# 4. HIGH — process resurrection
 sudo pkill -9 -f sessionwatch-monitor.sh
-#   → systemd restarts it within 1s AND a "resurrected daemon" HIGH alert is sent
+#   → systemd restarts within 1s AND a "resurrected daemon" HIGH alert is sent
 
-# 5. Test CRITICAL Alert (Auditd Lifecycle)
+# 5. CRITICAL — auditd lifecycle
 #   Stop auditd forcibly (bypassing systemd) to see a DAEMON_END CRITICAL alert
 
-# 6. Test CRITICAL Alert (Log Tampering / DoS)
+# 6. CRITICAL — log tampering / DoS
 cat /dev/urandom > /var/log/audit/audit.log
-#   → Instant CRITICAL: "Log tampering / DoS attempt detected!"
+#   → Instant CRITICAL on every configured channel
 
-# 7. Test Wall Notification (Debian 13+)
-#   After installing with notification method "4) Wall", run any of the above
-#   commands in one terminal and watch a *second* open terminal receive the banner.
+# 7. Multi-channel verification
+#   Watch Discord/Teams/Email/Wall at the same time — all should light up
+#   for the same alert within a second.
+```
 
-# 8. Test Email Notification (msmtp)
-echo -e "Subject: test\r\nFrom: you@example.com\r\nTo: you@example.com\r\n\r\nhello" \
-  | msmtp -a sessionwatch you@example.com
-#   If it fails:
-tail -f /var/log/msmtp.log
-cat /etc/msmtprc
+Check each configured channel to confirm receipt. Local alert history is always available:
+
+```bash
+tail -f /var/log/sessionwatch/alerts.log
 ```
 
 ---
 
 ## ⚙️ File Locations & Commands
 
-### System Paths
-
 | Component | Path |
 | :--- | :--- |
-| Monitor Binary | `/usr/local/bin/sessionwatch-monitor.sh` |
+| Monitor binary | `/usr/local/bin/sessionwatch-monitor.sh` |
 | Uninstaller | `/usr/local/bin/uninstall-sessionwatch.sh` |
-| SessionWatch Service | `/etc/systemd/system/sessionwatch.service` |
-| Auditd Hardening Override | `/etc/systemd/system/auditd.service.d/override.conf` |
-| Audit Rules | `/etc/audit/rules.d/sessionwatch.rules` |
-| Auditd Config (locked) | `/etc/audit/auditd.conf` |
-| Alert Patterns | `/etc/sessionwatch/alert-patterns.txt` |
-| Notification Config | `/etc/sessionwatch/notification.conf` |
-| Local Alert Log | `/var/log/sessionwatch/alerts.log` |
-| Service State File | `/var/log/sessionwatch/service.state` |
-| Audit Log Directory (locked) | `/var/log/audit` (chmod 700) |
-| msmtp Config | `/etc/msmtprc` (mode 600) |
-| msmtp Log | `/var/log/msmtp.log` (mode 640) |
-| msmtp Account Name | `sessionwatch` (used with `msmtp -a sessionwatch`) |
-| Watchdog Cron | `/etc/cron.d/sessionwatch-watchdog` |
+| SessionWatch service | `/etc/systemd/system/sessionwatch.service` |
+| Auditd hardening override | `/etc/systemd/system/auditd.service.d/override.conf` |
+| Audit rules | `/etc/audit/rules.d/sessionwatch.rules` |
+| Auditd config (locked) | `/etc/audit/auditd.conf` |
+| Alert patterns | `/etc/sessionwatch/alert-patterns.txt` |
+| **Notification config (multi-channel)** | `/etc/sessionwatch/notification.conf` |
+| Local alert log | `/var/log/sessionwatch/alerts.log` |
+| Service state file | `/var/log/sessionwatch/service.state` |
+| Audit log directory (locked) | `/var/log/audit` (mode 700) |
+| msmtp config | `/etc/msmtprc` (mode 600) |
+| msmtp log | `/var/log/msmtp.log` (mode 640) |
+| msmtp account name | `sessionwatch` |
+| Watchdog cron | `/etc/cron.d/sessionwatch-watchdog` |
 
-### Files Locked with `chattr +i`
+### Files locked with `chattr +i`
 
 - `/usr/local/bin/sessionwatch-monitor.sh`
 - `/etc/systemd/system/sessionwatch.service`
@@ -413,41 +350,62 @@ cat /etc/msmtprc
 - `/etc/cron.d/sessionwatch-watchdog`
 - `/etc/sessionwatch/alert-patterns.txt`
 
-### Useful Management Commands
+### Useful commands
 
 ```bash
-# Check service status (both)
+# Service status
 systemctl status sessionwatch auditd
 
-# View live monitoring logs
+# Live monitor logs
 journalctl -u sessionwatch -f
 
-# View local alert history
+# Local alert history
 tail -f /var/log/sessionwatch/alerts.log
 
-# Verify active audit rules
+# Show configured channels
+cat /etc/sessionwatch/notification.conf
+
+# Verify audit rules
 auditctl -l
+auditctl -s | grep enabled   # should show "enabled 2"
 
-# Verify kernel-level audit lock
-auditctl -s | grep enabled   # should show "enabled 2" (immutable)
-
-# Verify file immutability
+# Verify immutability
 lsattr /usr/local/bin/sessionwatch-monitor.sh
 
-# Verify auditd rotation settings
-grep -E 'max_log_file|num_logs|max_log_file_action|space_left_action|admin_space_left_action' /etc/audit/auditd.conf
+# Verify auditd rotation caps
+grep -E 'max_log_file|num_logs|max_log_file_action' /etc/audit/auditd.conf
 
-# Verify /var/log/audit is locked down
-stat -c '%a %n' /var/log/audit   # should show "700 /var/log/audit"
+# Verify audit log dir perms
+stat -c '%a %n' /var/log/audit   # 700
 
-# Check active ptys (Wall notifications)
+# Active ptys (Wall target)
 ls -l /dev/pts/
 
 # Email debug
 cat /etc/msmtprc
 tail -f /var/log/msmtp.log
-msmtp --version
 ```
+
+---
+
+## 🔄 Changing Channels After Install
+
+The config is not immutable — only `alert-patterns.txt` and the monitor binary are. Edit safely:
+
+```bash
+sudo nano /etc/sessionwatch/notification.conf
+# Adjust NOTIFICATION_METHODS and the relevant per-channel values
+sudo systemctl restart sessionwatch
+```
+
+Example — add Teams to an existing Discord + Wall setup:
+
+```ini
+NOTIFICATION_METHODS="discord teams wall"
+TEAMS_WEBHOOK="https://outlook.office.com/webhook/..."
+```
+
+No reinstall needed.
 
 ---
 
@@ -457,11 +415,11 @@ msmtp --version
 sudo /usr/local/bin/uninstall-sessionwatch.sh
 ```
 
-The uninstaller removes `chattr +i`, the watchdog cron, the auditd override, the SessionWatch unit, audit rules, binaries, configs, and logs.
+The uninstaller strips `chattr +i`, removes the watchdog cron, auditd override, SessionWatch unit, audit rules, binaries, configs and logs.
 
 > ⚠️ The kernel audit lock (`-e 2`) persists until the next **reboot**.
 >
-> ⚠️ The uninstaller does **not** revert `auditd.conf` rotation hardening. If you want pristine defaults, restore it from your distro package (`apt install --reinstall auditd` or `dnf reinstall audit`).
+> ⚠️ The uninstaller does **not** revert `auditd.conf` rotation hardening. To restore pristine defaults: `apt install --reinstall auditd` (Debian) / `dnf reinstall audit` (RHEL family).
 
 ---
 

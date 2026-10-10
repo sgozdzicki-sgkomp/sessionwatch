@@ -1,3 +1,2 @@
-1. Mixed mode - more than one way of sending alert at a time
-2. maybe some UI to modify alerting patterns
-3. Locking out user accounts under special circumstances - had any ideas for this? Let me know.
+1. maybe some UI to modify alerting patterns
+2. Locking out user accounts under special circumstances - had any ideas for this? Let me know.
